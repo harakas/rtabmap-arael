@@ -31,13 +31,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/utilite/UTimer.h>
 #include <rtabmap/utilite/UFile.h>
 #include <rtabmap/utilite/UStl.h>
+#include <rtabmap/utilite/UConversion.h>
 
 using namespace rtabmap;
 
 void showUsage()
 {
 	printf("\nUsage:\n"
-			"rtabmap-globalBundleAdjustment database.db\n"
+			"rtabmap-globalBundleAdjustment [options] database.db\n\n"
+			"  Options:\n"
+			"     --ba_strategy #   BA optimizer: 1=g2o 2=GTSAM 3=Ceres 4=cvsba 5=arael (default 1).\n"
 			"\n%s", Parameters::showUsage());
 	exit(1);
 }
@@ -52,12 +55,35 @@ int main(int argc, char * argv[])
 		showUsage();
 	}
 
+	int strategy = 1;
 	for(int i=1; i<argc-1; ++i)
 	{
 		if(std::strcmp(argv[i], "--help") == 0)
 		{
 			showUsage();
 		}
+		else if(std::strcmp(argv[i], "--ba_strategy") == 0)
+		{
+			++i;
+			if(i<argc-1)
+			{
+				strategy = uStr2Int(argv[i]);
+				if(strategy < 1 || strategy > 5)
+				{
+					printf("Invalid --ba_strategy (%d), see usage.\n", strategy);
+					showUsage();
+				}
+			}
+			else
+			{
+				showUsage();
+			}
+		}
+	}
+	if(!Optimizer::isAvailable((Optimizer::Type)strategy))
+	{
+		printf("Optimizer strategy %d is not available in this build.\n", strategy);
+		return -1;
 	}
 	ParametersMap inputParams = Parameters::parseArguments(argc,  argv);
 
@@ -117,8 +143,8 @@ int main(int argc, char * argv[])
 	rtabmap.getGraph(optimizedPoses, links, true, true, &nodes, true, true, true, true);
 	printf("Optimizing the map... done (%fs, poses=%d).\n", timer.ticks(), (int)optimizedPoses.size());
 
-	printf("Global bundle adjustment...\n");
-	Optimizer * optimizer = Optimizer::create(Optimizer::kTypeG2O, parameters);
+	printf("Global bundle adjustment (strategy=%d)...\n", strategy);
+	Optimizer * optimizer = Optimizer::create((Optimizer::Type)strategy, parameters);
 	optimizedPoses = optimizer->optimizeBA(optimizedPoses.lower_bound(1)->first, optimizedPoses, links, nodes, true, parameters);
 	delete optimizer;
 	printf("Global bundle adjustment... done (%fs).\n", timer.ticks());

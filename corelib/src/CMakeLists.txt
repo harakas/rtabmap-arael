@@ -82,7 +82,8 @@ SET(SRC_FILES
     optimizer/OptimizerGTSAM.cpp
     optimizer/OptimizerCVSBA.cpp
     optimizer/OptimizerCeres.cpp
-    
+    optimizer/OptimizerArael.cpp
+
     Registration.cpp
     RegistrationIcp.cpp
     RegistrationVis.cpp
@@ -492,6 +493,18 @@ IF(CERES_FOUND)
 	  ${CERES_LIBRARIES}
 	)
 ENDIF(CERES_FOUND)
+
+IF(WITH_ARAEL AND ARAEL_FOUND)
+	ADD_SUBDIRECTORY(optimizer/arael/cxx ${CMAKE_CURRENT_BINARY_DIR}/arael_gen)
+	SET(INCLUDE_DIRS
+	  ${INCLUDE_DIRS}
+	  ${CMAKE_CURRENT_SOURCE_DIR}/optimizer/arael/cxx/include
+	)
+	SET(LIBRARIES
+	  ${LIBRARIES}
+	  arael::rtabmap_arael
+	)
+ENDIF(WITH_ARAEL AND ARAEL_FOUND)
 
 IF(MRPT_FOUND)
 	SET(LIBRARIES

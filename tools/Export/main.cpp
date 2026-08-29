@@ -33,7 +33,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/util3d_surface.h>
 #include <rtabmap/core/util2d.h>
 #include <rtabmap/core/util3d_mapping.h>
-#include <rtabmap/core/optimizer/OptimizerG2O.h>
+#include <rtabmap/core/Optimizer.h>
 #include <rtabmap/core/Graph.h>
 #include <rtabmap/core/Signature.h>
 #include <rtabmap/core/global_map/OccupancyGrid.h>
@@ -141,6 +141,7 @@ void showUsage()
 			"                              map saved in database (if exists) is exported.\n"
 			"    --octomap             Export 3D OctoMap.\n"
 			"    --ba                  Do global bundle adjustment before assembling the clouds.\n"
+			"    --ba_strategy   #     BA optimizer used with --ba: 1=g2o 2=GTSAM 3=Ceres 4=cvsba 5=arael (default 1).\n"
 			"    --gain          #     Gain compensation value (default 1, set 0 to disable).\n"
 			"    --gain_gray           Do gain estimation compensation on gray channel only (default RGB channels).\n"
 			"    --no_blending         Disable blending when texturing.\n"
@@ -255,6 +256,7 @@ int main(int argc, char * argv[])
 	bool exportMesh = false;
 	bool texture = false;
 	bool ba = false;
+	int baStrategy = 1;
 	bool doGainCompensationRGB = true;
 	float gainValue = 1;
 	bool doBlending = true;
@@ -637,6 +639,23 @@ int main(int argc, char * argv[])
 		else if(std::strcmp(argv[i], "--ba") == 0)
 		{
 			ba = true;
+		}
+		else if(std::strcmp(argv[i], "--ba_strategy") == 0)
+		{
+			++i;
+			if(i<argc-1)
+			{
+				baStrategy = uStr2Int(argv[i]);
+				if(baStrategy < 1 || baStrategy > 5)
+				{
+					printf("Invalid --ba_strategy (%d)\n", baStrategy);
+					showUsage();
+				}
+			}
+			else
+			{
+				showUsage();
+			}
 		}
 		else if(std::strcmp(argv[i], "--gain_gray") == 0)
 		{
@@ -1211,6 +1230,12 @@ int main(int argc, char * argv[])
 		exportMesh = true;
 	}
 
+	if(ba && !Optimizer::isAvailable((Optimizer::Type)baStrategy))
+	{
+		printf("BA optimizer strategy %d is not available in this build.\n", baStrategy);
+		return -1;
+	}
+
 	ParametersMap params = Parameters::parseArguments(argc, argv, false);
 
 	std::string dbPath = argv[argc-1];
@@ -1445,10 +1470,10 @@ int main(int argc, char * argv[])
 
 		if(ba)
 		{
-			printf("Global bundle adjustment...\n");
+			printf("Global bundle adjustment (strategy=%d)...\n", baStrategy);
 			// TODO: these conversions could be simplified
 			UASSERT(optimizedPoses.lower_bound(1) != optimizedPoses.end());
-			OptimizerG2O g2o(parameters);
+			Optimizer * baOptimizer = Optimizer::create((Optimizer::Type)baStrategy, parameters);
 			std::list<int> ids;
 			for(std::map<int, Transform>::iterator iter=optimizedPoses.lower_bound(1); iter!=optimizedPoses.end(); ++iter)
 			{
@@ -1461,7 +1486,8 @@ int main(int argc, char * argv[])
 			{
 				nodes.insert(std::make_pair((*iter)->id(), *(*iter)));
 			}
-			optimizedPoses = ((Optimizer*)&g2o)->optimizeBA(optimizedPoses.lower_bound(1)->first, optimizedPoses, links, nodes, true);
+			optimizedPoses = baOptimizer->optimizeBA(optimizedPoses.lower_bound(1)->first, optimizedPoses, links, nodes, true);
+			delete baOptimizer;
 			printf("Global bundle adjustment... done (%fs).\n", timer.ticks());
 		}
 	}

@@ -73,7 +73,8 @@ typedef std::map<int, std::set<int> > BAOutliers; // <word ID, rejected pose IDs
  *
  * Optimizer is a factory + interface in front of several third-party back-ends
  * (@ref kTypeTORO "TORO", @ref kTypeG2O "g2o", @ref kTypeGTSAM "GTSAM",
- * @ref kTypeCeres "Ceres", @ref kTypeCVSBA "cvsba"). Use @ref create() to instantiate one
+ * @ref kTypeCeres "Ceres", @ref kTypeCVSBA "cvsba", @ref kTypeArael "arael").
+ * Use @ref create() to instantiate one
  * based on the @c Optimizer/Strategy parameter; use @ref isAvailable() to check whether a
  * given back-end was compiled in.
  *
@@ -97,7 +98,8 @@ public:
 		kTypeG2O = 1,    ///< g2o (general graph optimization, supports BA).
 		kTypeGTSAM = 2,  ///< GTSAM (factor graphs, iSAM2-style incremental).
 		kTypeCeres = 3,  ///< Ceres Solver (nonlinear least squares, supports BA).
-		kTypeCVSBA = 4   ///< cvsba (sparse bundle adjustment only).
+		kTypeCVSBA = 4,  ///< cvsba (sparse bundle adjustment only).
+		kTypeArael = 5   ///< arael (nonlinear least squares; vendored Rust library).
 	};
 
 	/**

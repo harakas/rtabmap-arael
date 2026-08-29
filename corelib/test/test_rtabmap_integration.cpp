@@ -1177,6 +1177,7 @@ TEST_F(RtabmapIntegrationFixture, PR2_Scan2D_Stereo)
 		{Optimizer::kTypeG2O,   "g2o",   0.05f, 5300, 23000},
 		{Optimizer::kTypeGTSAM, "gtsam", 0.05f, 5300, 23000},
 		{Optimizer::kTypeCeres, "ceres", 0.10f, 5700, 24500},
+		{Optimizer::kTypeArael, "arael", 0.05f, 5300, 23000},
 	};
 
 	int variantsTested = 0;
@@ -1269,6 +1270,7 @@ TEST_F(RtabmapIntegrationFixture, Stereo20Hz)
 		{Optimizer::kTypeG2O,   "g2o",                                    {}, false},
 		{Optimizer::kTypeGTSAM, "gtsam",                                  {}, false},
 		{Optimizer::kTypeCeres, "ceres",                                  {}, false},
+		{Optimizer::kTypeArael, "arael",                                  {}, false},
 		{Optimizer::kTypeG2O,   "g2o_no_optical_flow",
 				{{Parameters::kStereoOpticalFlow(), "false"}},            false},
 		{Optimizer::kTypeG2O,   "g2o_no_min_eigenvals",
@@ -1370,6 +1372,7 @@ TEST_F(RtabmapIntegrationFixture, PR2_Scan2D_RGBD)
 		{Optimizer::kTypeG2O,   "g2o"  },
 		{Optimizer::kTypeGTSAM, "gtsam"},
 		{Optimizer::kTypeCeres, "ceres"},
+		{Optimizer::kTypeArael, "arael"},
 	};
 
 	int variantsTested = 0;
@@ -1766,6 +1769,7 @@ TEST_F(RtabmapIntegrationFixture, TwoLoopsWorkspaceGlobalBA)
 		{Optimizer::kTypeG2O,   "g2o-rematch", true,  true,  0.05f, 1.5f },
 		{Optimizer::kTypeGTSAM, "gtsam",       false, false, 0.05f, 1.5f },
 		{Optimizer::kTypeCeres, "ceres",       false, false, 0.07f, 2.5f },
+		{Optimizer::kTypeArael, "arael",       false, false, 0.05f, 1.5f },
 	};
 
 	int variantsTested = 0;
@@ -1903,14 +1907,17 @@ TEST_F(RtabmapIntegrationFixture, RobustGraphOptimizationStereo)
 		const char * label;
 	};
 	// g2o and gtsam each cover both robust/no-robust at the default
-	// MaxError=3. Ceres is skipped here — it doesn't implement Vertigo
-	// switches (Optimizer/Robust=true), so it can't exercise the robust
-	// path that's the point of this DB.
+	// MaxError=3; arael's robust mode uses its own robust losses instead
+	// of Vertigo switches. Ceres is skipped here — it doesn't implement
+	// Optimizer/Robust at all, so it can't exercise the robust path
+	// that's the point of this DB.
 	const std::vector<Variant> variants = {
 		{Optimizer::kTypeG2O,   true,  3.0f, "g2o-robust-maxerr3"     },
 		{Optimizer::kTypeG2O,   false, 3.0f, "g2o-norobust-maxerr3"   },
 		{Optimizer::kTypeGTSAM, true,  3.0f, "gtsam-robust-maxerr3"   },
 		{Optimizer::kTypeGTSAM, false, 3.0f, "gtsam-norobust-maxerr3" },
+		{Optimizer::kTypeArael, true,  3.0f, "arael-robust-maxerr3"   },
+		{Optimizer::kTypeArael, false, 3.0f, "arael-norobust-maxerr3" },
 	};
 
 	// Golden trajectory captured from the g2o-robust-maxerr3 variant and
@@ -1932,10 +1939,11 @@ TEST_F(RtabmapIntegrationFixture, RobustGraphOptimizationStereo)
 			continue;
 		}
 #ifndef RTABMAP_VERTIGO
-		if(v.robust)
+		if(v.robust && v.optType != Optimizer::kTypeArael)
 		{
 			// optimize() would warn and clear the robust flag, so this variant
 			// would silently measure the non-robust path instead of failing.
+			// arael's robust losses don't need Vertigo.
 			std::cerr << "[skip] " << v.label << " (needs Vertigo)\n";
 			continue;
 		}

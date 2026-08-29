@@ -70,6 +70,7 @@ TEST(OptimizerTest, TypeEnumValuesAreStable)
 	EXPECT_EQ(static_cast<int>(Optimizer::kTypeGTSAM),   2);
 	EXPECT_EQ(static_cast<int>(Optimizer::kTypeCeres),   3);
 	EXPECT_EQ(static_cast<int>(Optimizer::kTypeCVSBA),   4);
+	EXPECT_EQ(static_cast<int>(Optimizer::kTypeArael),   5);
 }
 
 TEST(OptimizerTest, IsAvailableAtLeastOneOptimizer)
@@ -80,7 +81,8 @@ TEST(OptimizerTest, IsAvailableAtLeastOneOptimizer)
 			Optimizer::isAvailable(Optimizer::kTypeTORO) ||
 			Optimizer::isAvailable(Optimizer::kTypeG2O) ||
 			Optimizer::isAvailable(Optimizer::kTypeGTSAM) ||
-			Optimizer::isAvailable(Optimizer::kTypeCeres);
+			Optimizer::isAvailable(Optimizer::kTypeCeres) ||
+			Optimizer::isAvailable(Optimizer::kTypeArael);
 	EXPECT_TRUE(anyAvailable) << "No graph optimizer was compiled in";
 }
 
@@ -101,7 +103,7 @@ TEST(OptimizerTest, CreateFallsBackWhenTypeNotAvailable)
 	// Pick whatever IS available and ask for it explicitly.
 	for(int t : {Optimizer::kTypeTORO, Optimizer::kTypeG2O,
 				 Optimizer::kTypeGTSAM, Optimizer::kTypeCeres,
-				 Optimizer::kTypeCVSBA})
+				 Optimizer::kTypeCVSBA, Optimizer::kTypeArael})
 	{
 		if(Optimizer::isAvailable(static_cast<Optimizer::Type>(t)))
 		{
@@ -121,7 +123,7 @@ TEST(OptimizerTest, CreateViaParametersMapHonorsOptimizerStrategy)
 	// (the path used by Rtabmap::init when reading user config).
 	for(int t : {Optimizer::kTypeTORO, Optimizer::kTypeG2O,
 				 Optimizer::kTypeGTSAM, Optimizer::kTypeCeres,
-				 Optimizer::kTypeCVSBA})
+				 Optimizer::kTypeCVSBA, Optimizer::kTypeArael})
 	{
 		if(Optimizer::isAvailable(static_cast<Optimizer::Type>(t)))
 		{
@@ -391,6 +393,7 @@ std::string optimizerTypeName(Optimizer::Type type)
 	case Optimizer::kTypeGTSAM: return "GTSAM";
 	case Optimizer::kTypeCeres: return "Ceres";
 	case Optimizer::kTypeCVSBA: return "CVSBA";
+	case Optimizer::kTypeArael: return "Arael";
 	default:                    return "Undef";
 	}
 }
@@ -474,7 +477,8 @@ INSTANTIATE_TEST_SUITE_P(
 				Optimizer::kTypeTORO,
 				Optimizer::kTypeG2O,
 				Optimizer::kTypeGTSAM,
-				Optimizer::kTypeCeres),
+				Optimizer::kTypeCeres,
+				Optimizer::kTypeArael),
 		[](const ::testing::TestParamInfo<Optimizer::Type> & info) {
 			return optimizerTypeName(info.param);
 		});
@@ -721,7 +725,8 @@ TEST_P(CircleGraphTest, NoisyInitialGuessConvergesToTruth)
 	// and "both" is already covered by the unperturbed noisy test.
 	const bool priorsOnly  = (gravitySigma == 0.0f && !priorsIgnored);
 	const bool gravityOnly = (gravitySigma >  0.0f &&  priorsIgnored);
-	if((opt->type() == Optimizer::kTypeG2O || opt->type() == Optimizer::kTypeGTSAM) && !force3DoF && (priorsOnly || gravityOnly))
+	if((opt->type() == Optimizer::kTypeG2O || opt->type() == Optimizer::kTypeGTSAM ||
+		opt->type() == Optimizer::kTypeArael) && !force3DoF && (priorsOnly || gravityOnly))
 	{
 		const float deg = static_cast<float>(CV_PI) / 180.0f;
 		const float dRoll        = 3.0f * deg;
@@ -788,12 +793,13 @@ TEST_P(CircleGraphTest, NoisyInitialGuessConvergesToTruth)
 	std::map<int, Transform> out = opt->optimize(rootId, inPoses, inLinks);
 	ASSERT_FALSE(out.empty()) << "Optimizer returned no poses";
 
-	// Only g2o and GTSAM actually optimize landmarks; TORO and Ceres log a
-	// warning and drop the landmark silently from the output. So the landmark
-	// appears in the output when (a) the backend supports it AND
+	// Only g2o, GTSAM and arael actually optimize landmarks; TORO and Ceres
+	// log a warning and drop the landmark silently from the output. So the
+	// landmark appears in the output when (a) the backend supports it AND
 	// (b) landmarksIgnored is false.
 	const bool backendSupportsLandmarks =
-			backend == Optimizer::kTypeG2O || backend == Optimizer::kTypeGTSAM;
+			backend == Optimizer::kTypeG2O || backend == Optimizer::kTypeGTSAM ||
+			backend == Optimizer::kTypeArael;
 	const bool expectLandmarkInOutput = backendSupportsLandmarks && !landmarksIgnored;
 	EXPECT_EQ(out.size(), kCircleN + (expectLandmarkInOutput ? 1u : 0u));
 
@@ -834,7 +840,8 @@ INSTANTIATE_TEST_SUITE_P(
 				::testing::Values(Optimizer::kTypeTORO,
 								  Optimizer::kTypeG2O,
 								  Optimizer::kTypeGTSAM,
-								  Optimizer::kTypeCeres),
+								  Optimizer::kTypeCeres,
+								  Optimizer::kTypeArael),
 				::testing::Bool(),                  // Reg/Force3DoF
 				::testing::Values(0.0f, 0.01f),     // Optimizer/GravitySigma
 				::testing::Bool(),                  // Optimizer/PriorsIgnored
@@ -872,10 +879,11 @@ protected:
 			GTEST_SKIP() << optimizerTypeName(t) << " not built in";
 		}
 #ifndef RTABMAP_VERTIGO
-		if(std::get<1>(GetParam()))
+		if(std::get<1>(GetParam()) && t != Optimizer::kTypeArael)
 		{
 			// Without Vertigo, optimize() warns and silently clears the robust
-			// flag, so the corrupted loop closure is never rejected.
+			// flag, so the corrupted loop closure is never rejected. The arael
+			// backend uses its own robust losses, no Vertigo needed.
 			GTEST_SKIP() << "robust optimization needs Vertigo (WITH_VERTIGO=ON)";
 		}
 #endif
@@ -983,7 +991,9 @@ INSTANTIATE_TEST_SUITE_P(
 				std::make_tuple(Optimizer::kTypeG2O,   false),
 				std::make_tuple(Optimizer::kTypeG2O,   true),
 				std::make_tuple(Optimizer::kTypeGTSAM, false),
-				std::make_tuple(Optimizer::kTypeGTSAM, true)),
+				std::make_tuple(Optimizer::kTypeGTSAM, true),
+				std::make_tuple(Optimizer::kTypeArael, false),
+				std::make_tuple(Optimizer::kTypeArael, true)),
 		[](const ::testing::TestParamInfo<CircleBadLcParam> & info)
 		{
 			std::string name = optimizerTypeName(std::get<0>(info.param));
@@ -2283,6 +2293,12 @@ INSTANTIATE_TEST_SUITE_P(
 				std::make_tuple(Optimizer::kTypeCeres, BaVariant::kWithDepthNoLinks, false),
 				std::make_tuple(Optimizer::kTypeCeres, BaVariant::kWithDepthNoLinksTuned,      false),
 				std::make_tuple(Optimizer::kTypeCeres, BaVariant::kWithLidarDepthNoLinksTuned, false),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kDefault,             false),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kNoLinks,          false),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kWithDepth,        false),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kWithDepthNoLinks, false),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kWithDepthNoLinksTuned,      false),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kWithLidarDepthNoLinksTuned, false),
 				std::make_tuple(Optimizer::kTypeCVSBA, BaVariant::kDefault,             false),
 				// Same setups but with keypoints rounded to integer pixel
 				// coordinates (simulates a real detector).
@@ -2298,6 +2314,10 @@ INSTANTIATE_TEST_SUITE_P(
 				std::make_tuple(Optimizer::kTypeCeres, BaVariant::kNoLinks,             true),
 				std::make_tuple(Optimizer::kTypeCeres, BaVariant::kWithDepth,           true),
 				std::make_tuple(Optimizer::kTypeCeres, BaVariant::kWithDepthNoLinks,    true),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kDefault,             true),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kNoLinks,             true),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kWithDepth,           true),
+				std::make_tuple(Optimizer::kTypeArael, BaVariant::kWithDepthNoLinks,    true),
 				std::make_tuple(Optimizer::kTypeCVSBA, BaVariant::kDefault,             true)),
 		[](const ::testing::TestParamInfo<BaParam> & info)
 		{
@@ -2307,6 +2327,141 @@ INSTANTIATE_TEST_SUITE_P(
 			if(std::get<2>(info.param)) name += "_Rounded";
 			return name;
 		});
+
+// ---------------------------------------------------------------------------
+// AraelBaSolveTest -- Arael/BaSolve=1 solves the reduced camera system by
+// conjugate gradients; on the same problem it must land at the same optimum
+// as the default direct solver.
+// ---------------------------------------------------------------------------
+TEST(AraelBaSolveTest, CgSolverMatchesDefault)
+{
+	if(!Optimizer::isAvailable(Optimizer::kTypeArael))
+	{
+		GTEST_SKIP() << "arael not built in";
+	}
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+
+	std::map<int, Transform> outPoses[2];
+	for(int solve = 0; solve <= 1; ++solve)
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerStrategy()] =
+				uNumber2Str(static_cast<int>(Optimizer::kTypeArael));
+		params[Parameters::kOptimizerIterations()] = "200";
+		params[Parameters::kOptimizerBaseline()]   = "0.15";
+		params[Parameters::kAraelBaSolve()]        = uNumber2Str(solve);
+		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+		ASSERT_EQ(opt->type(), Optimizer::kTypeArael);
+		std::map<int, cv::Point3f> outPoints = g.initialPoints3D;
+		outPoses[solve] = opt->optimizeBA(
+				/*rootId=*/1, g.initialPoses, g.links, g.models, outPoints, g.wordReferences);
+		ASSERT_FALSE(outPoses[solve].empty()) << "Arael/BaSolve=" << solve;
+		ASSERT_EQ(outPoses[solve].size(), g.truePoses.size());
+	}
+
+	// gauge-independent: compare in each solution's root frame
+	const Transform aRootInv = outPoses[0].at(1).inverse();
+	const Transform bRootInv = outPoses[1].at(1).inverse();
+	for(const auto & kv : outPoses[0])
+	{
+		const Transform a = aRootInv * kv.second;
+		const Transform b = bRootInv * outPoses[1].at(kv.first);
+		EXPECT_LT(a.getDistance(b), 0.005f) << "pose " << kv.first;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AraelBaRobustLossTest -- on clean (noisy but outlier-free) data every
+// Arael/BaRobustLoss lands at the same optimum: the losses only differ on
+// residuals far beyond the Arael/BaRobustC2 scale.
+// ---------------------------------------------------------------------------
+TEST(AraelBaRobustLossTest, AllLossesReachTheSameOptimum)
+{
+	if(!Optimizer::isAvailable(Optimizer::kTypeArael))
+	{
+		GTEST_SKIP() << "arael not built in";
+	}
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+
+	std::map<int, Transform> ref;
+	for(int loss = 0; loss <= 2; ++loss)
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerStrategy()] =
+				uNumber2Str(static_cast<int>(Optimizer::kTypeArael));
+		params[Parameters::kOptimizerIterations()] = "200";
+		params[Parameters::kOptimizerBaseline()]   = "0.15";
+		params[Parameters::kAraelBaRobustLoss()]   = uNumber2Str(loss);
+		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+		std::map<int, cv::Point3f> outPoints = g.initialPoints3D;
+		std::map<int, Transform> outPoses = opt->optimizeBA(
+				/*rootId=*/1, g.initialPoses, g.links, g.models, outPoints, g.wordReferences);
+		ASSERT_FALSE(outPoses.empty()) << "Arael/BaRobustLoss=" << loss;
+		if(loss == 0)
+		{
+			ref = outPoses;
+			continue;
+		}
+		const Transform aRootInv = ref.at(1).inverse();
+		const Transform bRootInv = outPoses.at(1).inverse();
+		for(const auto & kv : ref)
+		{
+			EXPECT_LT((aRootInv * kv.second).getDistance(
+					bRootInv * outPoses.at(kv.first)), 0.01f)
+				<< "loss " << loss << " pose " << kv.first;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AraelBaPruneTest -- Arael/BaPruneChi2 > 0 restores the prune-and-resolve
+// second stage; on clean data it prunes little and lands at the same
+// optimum as the default single solve.
+// ---------------------------------------------------------------------------
+TEST(AraelBaPruneTest, PruneStageKeepsThePoses)
+{
+	if(!Optimizer::isAvailable(Optimizer::kTypeArael))
+	{
+		GTEST_SKIP() << "arael not built in";
+	}
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+
+	std::map<int, Transform> outPoses[2];
+	int rejected[2] = {0, 0};
+	for(int mode = 0; mode <= 1; ++mode)
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerStrategy()] =
+				uNumber2Str(static_cast<int>(Optimizer::kTypeArael));
+		params[Parameters::kOptimizerIterations()] = "200";
+		params[Parameters::kOptimizerBaseline()]   = "0.15";
+		if(mode == 1)
+		{
+			params[Parameters::kAraelBaPruneChi2()] = "64";
+		}
+		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+		std::map<int, cv::Point3f> outPoints = g.initialPoints3D;
+		BAOutliers outliers;
+		outPoses[mode] = opt->optimizeBA(
+				/*rootId=*/1, g.initialPoses, g.links, g.models, outPoints,
+				g.wordReferences, &outliers);
+		ASSERT_FALSE(outPoses[mode].empty()) << "mode " << mode;
+		for(const auto & w : outliers)
+		{
+			rejected[mode] += (int)w.second.size();
+		}
+	}
+	// pruning at the knee on clean data cuts at most a stray tail
+	EXPECT_LT(rejected[1], 50);
+	const Transform aRootInv = outPoses[0].at(1).inverse();
+	const Transform bRootInv = outPoses[1].at(1).inverse();
+	for(const auto & kv : outPoses[0])
+	{
+		EXPECT_LT((aRootInv * kv.second).getDistance(
+				bRootInv * outPoses[1].at(kv.first)), 0.01f)
+			<< "pose " << kv.first;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Regression test: wordReferences with negative ids. optimizeBA() puts no sign
@@ -2383,7 +2538,8 @@ INSTANTIATE_TEST_SUITE_P(
 		::testing::Values(
 				Optimizer::kTypeG2O,
 				Optimizer::kTypeGTSAM,
-				Optimizer::kTypeCeres),
+				Optimizer::kTypeCeres,
+				Optimizer::kTypeArael),
 		[](const ::testing::TestParamInfo<Optimizer::Type> & info)
 		{
 			return optimizerTypeName(info.param);
@@ -2459,7 +2615,8 @@ TEST_P(PlanarBundleAdjustmentTest, RecoveredTrajectoryStaysOnInitialPlane)
 INSTANTIATE_TEST_SUITE_P(
 		Backends,
 		PlanarBundleAdjustmentTest,
-		::testing::Values(Optimizer::kTypeG2O, Optimizer::kTypeGTSAM, Optimizer::kTypeCeres),
+		::testing::Values(Optimizer::kTypeG2O, Optimizer::kTypeGTSAM, Optimizer::kTypeCeres,
+				Optimizer::kTypeArael),
 		[](const ::testing::TestParamInfo<Optimizer::Type> & info)
 		{
 			return optimizerTypeName(info.param);
@@ -2866,7 +3023,8 @@ INSTANTIATE_TEST_SUITE_P(
 		// stereo (15 cm baseline + noisy disparity-derived depth) with
 		// or without the pose-graph chain. 24 variants total.
 		::testing::Combine(
-				::testing::Values(Optimizer::kTypeG2O, Optimizer::kTypeGTSAM, Optimizer::kTypeCeres),
+				::testing::Values(Optimizer::kTypeG2O, Optimizer::kTypeGTSAM, Optimizer::kTypeCeres,
+						Optimizer::kTypeArael),
 				::testing::Values(MultiCamFov::kWide, MultiCamFov::kNarrow),
 				::testing::Values(MultiCamMode::kMono, MultiCamMode::kStereo),
 				::testing::Values(MultiCamLinks::kWithLinks, MultiCamLinks::kNoLinks)),
@@ -3020,6 +3178,14 @@ protected:
 		}
 		ParametersMap parameters;
 		parameters.insert(ParametersPair(Parameters::kOptimizerRobustKernelDelta(), "8"));
+		if(GetParam() == Optimizer::kTypeArael)
+		{
+			// this suite verifies the rejection contract; arael's rejection
+			// mechanism is the optional prune stage (its default single
+			// robust solve only reports -- see AraelBaOutlierReportTest and
+			// AraelBaPruneTest)
+			parameters.insert(ParametersPair(Parameters::kAraelBaPruneChi2(), "64"));
+		}
 		opt_.reset(Optimizer::create(GetParam(), parameters));
 		ASSERT_NE(opt_.get(), nullptr);
 		opt_->setIterations(50);
@@ -3206,6 +3372,12 @@ TEST_P(BAOutlierRejectionTest, RejectsBadObservationsAndReportsThem)
 
 TEST_P(BAOutlierRejectionTest, RejectsOnDocumentedChi2Threshold)
 {
+	if(GetParam() == Optimizer::kTypeArael)
+	{
+		GTEST_SKIP() << "arael reports outliers on its own documented threshold"
+				" (Arael/BaRobustC2), not the delta chi2 reading; see"
+				" AraelBaOutlierReportTest";
+	}
 	// The backends must agree on *where* the threshold is, not merely that they
 	// have one. Optimizer/RobustKernelDelta documents itself as a chi2 threshold,
 	// so the default 8 rejects at chi2 > 8, i.e. |r| > sqrt(8) ~ 2.83 sigma. The
@@ -3228,8 +3400,852 @@ TEST_P(BAOutlierRejectionTest, RejectsOnDocumentedChi2Threshold)
 INSTANTIATE_TEST_SUITE_P(
 		BABackends,
 		BAOutlierRejectionTest,
-		::testing::Values(Optimizer::kTypeG2O, Optimizer::kTypeGTSAM, Optimizer::kTypeCeres),
+		::testing::Values(Optimizer::kTypeG2O, Optimizer::kTypeGTSAM, Optimizer::kTypeCeres,
+				Optimizer::kTypeArael),
 		[](const ::testing::TestParamInfo<Optimizer::Type> & info)
 		{
 			return optimizerTypeName(info.param);
 		});
+
+// ---------------------------------------------------------------------------
+// AraelBaOutlierReportTest -- arael's outlier report threshold is
+// Arael/BaRobustC2 (Optimizer/RobustKernelDelta is only the robustness
+// switch). Same scene as BAOutlierRejectionTest.
+// ---------------------------------------------------------------------------
+namespace {
+
+class AraelBaOutlierReportTest : public BAOutlierRejectionTest
+{
+protected:
+	void SetUp() override
+	{
+		if(!Optimizer::isAvailable(Optimizer::kTypeArael))
+		{
+			GTEST_SKIP() << "arael not built in";
+		}
+		model_ = CameraModel(100.0, 100.0, 320.0, 240.0,
+				CameraModel::opticalRotation(), 0.0, cv::Size(640, 480));
+	}
+	void createOptimizer(const std::string & c2)
+	{
+		ParametersMap parameters;
+		parameters.insert(ParametersPair(Parameters::kOptimizerRobustKernelDelta(), "8"));
+		parameters.insert(ParametersPair(Parameters::kAraelBaRobustC2(), c2));
+		opt_.reset(Optimizer::create(Optimizer::kTypeArael, parameters));
+		ASSERT_NE(opt_.get(), nullptr);
+		opt_->setIterations(50);
+	}
+};
+
+}  // namespace
+
+TEST_F(AraelBaOutlierReportTest, ReportsAboveBaRobustC2)
+{
+	// Word -42's pose-4 view is displaced (+4,-4) px = chi2 32 at sigma 1:
+	// above a scale of 16, so it must be reported.
+	createOptimizer("16");
+	buildScene(true, 4.0f);
+	BAOutliers outliers;
+	ASSERT_FALSE(runBA(outliers).empty());
+	EXPECT_EQ(outliersFor(outliers, partialWordId_), std::set<int>({4}))
+			<< formatOutliers(outliers);
+}
+
+TEST_F(AraelBaOutlierReportTest, KeepsWithinBaRobustC2)
+{
+	// The same chi2 32 view sits inside the default scale of 256: kept.
+	createOptimizer("256");
+	buildScene(true, 4.0f);
+	BAOutliers outliers;
+	ASSERT_FALSE(runBA(outliers).empty());
+	EXPECT_TRUE(outliersFor(outliers, partialWordId_).empty())
+			<< formatOutliers(outliers);
+}
+
+// ---------------------------------------------------------------------------
+// AraelCeresParityTest -- the arael backend claims the exact cost function of
+// the Ceres backend. Verified here without trusting either backend's error
+// reporting: an independent Eigen implementation of the Ceres-convention cost
+// (0.5 * sum of squared sqrt-information-weighted residuals) is evaluated at
+// each backend's OUTPUT poses. Both backends must (a) report a finalError that
+// matches the reference at their own solution, and (b) land on optima of equal
+// cost. Information matrices are fully correlated so any deviation in residual
+// frame, quaternion-error side, or S application trips the check.
+//
+// Tolerances are bounded by Transform's float32 storage: optimize() returns
+// float poses while finalError is computed at the solver's internal doubles
+// (~1e-7 relative slack; see kParityRelTol).
+
+#ifdef RTABMAP_CERES
+#ifdef RTABMAP_ARAEL
+
+#include <Eigen/Cholesky>
+#include <rtabmap/core/optimizer/OptimizerArael.h>
+
+namespace {
+
+constexpr double kParityRelTol = 1e-5;
+
+double wrapAngleParity(double a)
+{
+	while(a > M_PI) a -= 2.0 * M_PI;
+	while(a < -M_PI) a += 2.0 * M_PI;
+	return a;
+}
+
+// Ceres-convention reference cost, 2D: information sub-block (x, y, theta) of
+// the 6x6, LLT upper factor, translation residual in pose a's frame.
+double ceresRefCost2d(const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links)
+{
+	double cost = 0.0;
+	for(const auto & kv : links)
+	{
+		const Link & l = kv.second;
+		const Transform & A = poses.at(l.from());
+		const Transform & B = poses.at(l.to());
+		Eigen::Matrix3d info;
+		const int idx[3] = {0, 1, 5};
+		for(int i = 0; i < 3; ++i)
+			for(int j = 0; j < 3; ++j)
+				info(i, j) = l.infMatrix().at<double>(idx[i], idx[j]);
+		const Eigen::Matrix3d S = info.llt().matrixU();
+
+		const double ca = std::cos(A.theta()), sa = std::sin(A.theta());
+		const double dx = B.x() - A.x(), dy = B.y() - A.y();
+		Eigen::Vector3d r;
+		r(0) =  ca * dx + sa * dy - l.transform().x();
+		r(1) = -sa * dx + ca * dy - l.transform().y();
+		r(2) = wrapAngleParity((B.theta() - A.theta()) - l.transform().theta());
+		r = S * r;
+		cost += 0.5 * r.squaredNorm();
+	}
+	return cost;
+}
+
+// Ceres-convention reference cost, 3D: full 6x6 information
+// [translation; rotation], LLT upper factor, rotation residual
+// 2 * vec(q_meas * q_estimated^-1).
+double ceresRefCost3d(const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links)
+{
+	double cost = 0.0;
+	for(const auto & kv : links)
+	{
+		const Link & l = kv.second;
+		const Transform & A = poses.at(l.from());
+		const Transform & B = poses.at(l.to());
+		Eigen::Matrix<double, 6, 6> info;
+		for(int i = 0; i < 6; ++i)
+			for(int j = 0; j < 6; ++j)
+				info(i, j) = l.infMatrix().at<double>(i, j);
+		const Eigen::Matrix<double, 6, 6> S = info.llt().matrixU();
+
+		const Eigen::Quaterniond qa = A.getQuaterniond();
+		const Eigen::Quaterniond qb = B.getQuaterniond();
+		const Eigen::Quaterniond qm = l.transform().getQuaterniond();
+		const Eigen::Vector3d pa(A.x(), A.y(), A.z());
+		const Eigen::Vector3d pb(B.x(), B.y(), B.z());
+		const Eigen::Vector3d tm(l.transform().x(), l.transform().y(), l.transform().z());
+
+		Eigen::Matrix<double, 6, 1> r;
+		r.head<3>() = qa.conjugate() * (pb - pa) - tm;
+		const Eigen::Quaterniond dq = qm * (qa.conjugate() * qb).conjugate();
+		r.tail<3>() = 2.0 * dq.vec();
+		r = S * r;
+		cost += 0.5 * r.squaredNorm();
+	}
+	return cost;
+}
+
+// Deterministic correlated symmetric positive definite 6x6.
+cv::Mat parityInfo6(double seed, double d)
+{
+	Eigen::Matrix<double, 6, 6> A;
+	double v = seed;
+	for(int i = 0; i < 6; ++i)
+		for(int j = 0; j < 6; ++j)
+		{
+			v = std::fmod(v * 1.7 + 0.31, 1.0);
+			A(i, j) = v - 0.5;
+		}
+	const Eigen::Matrix<double, 6, 6> I6 =
+			A.transpose() * A * 10.0 + Eigen::Matrix<double, 6, 6>::Identity() * d;
+	cv::Mat m(6, 6, CV_64FC1);
+	for(int i = 0; i < 6; ++i)
+		for(int j = 0; j < 6; ++j)
+			m.at<double>(i, j) = I6(i, j);
+	return m;
+}
+
+struct ParityRun
+{
+	std::map<int, Transform> out;
+	double finalError;
+};
+
+ParityRun runParityBackend(Optimizer::Type type, bool slam2d,
+		const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links)
+{
+	std::unique_ptr<Optimizer> opt(Optimizer::create(type));
+	opt->setSlam2d(slam2d);
+	opt->setIterations(100);
+	opt->setEpsilon(0.0);
+	cv::Mat cov;
+	ParityRun run;
+	run.finalError = -1.0;
+	run.out = opt->optimize(1, poses, links, cov, 0, &run.finalError, 0);
+	return run;
+}
+
+void expectParity(bool slam2d,
+		const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links)
+{
+	const ParityRun ceres = runParityBackend(Optimizer::kTypeCeres, slam2d, poses, links);
+	const ParityRun arael = runParityBackend(Optimizer::kTypeArael, slam2d, poses, links);
+	ASSERT_FALSE(ceres.out.empty());
+	ASSERT_FALSE(arael.out.empty());
+	ASSERT_EQ(ceres.out.size(), arael.out.size());
+
+	const double ceresRef = slam2d ? ceresRefCost2d(ceres.out, links)
+								   : ceresRefCost3d(ceres.out, links);
+	const double araelRef = slam2d ? ceresRefCost2d(arael.out, links)
+								   : ceresRefCost3d(arael.out, links);
+
+	// each backend's reported error is the reference cost at its own output
+	EXPECT_NEAR(ceres.finalError, ceresRef, kParityRelTol * ceresRef);
+	EXPECT_NEAR(arael.finalError, araelRef, kParityRelTol * araelRef);
+
+	// both reach optima of equal cost (one bound per direction so a genuine
+	// arael regression cannot hide behind Ceres stopping early)
+	EXPECT_LT(araelRef, ceresRef * (1.0 + 5e-3));
+	EXPECT_LT(ceresRef, araelRef * (1.0 + 5e-3));
+
+	// same basin: solutions describe the same geometry
+	for(const auto & kv : ceres.out)
+	{
+		ASSERT_TRUE(arael.out.count(kv.first));
+		EXPECT_LT(kv.second.getDistance(arael.out.at(kv.first)), 0.05)
+				<< "pose " << kv.first << " diverged between backends";
+	}
+}
+
+}  // namespace
+
+TEST(AraelCeresParityTest, AgreeOnCorrelated2DGraph)
+{
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1.05f, 0.1f, 0, 0, 0, 0.15f));
+	poses.emplace(3, Transform(1.9f, 1.1f, 0, 0, 0, 1.4f));
+
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor,
+			Transform(1.0f, 0.0f, 0, 0, 0, 0.10f), parityInfo6(0.13, 2.0)));
+	links.emplace(2, Link(2, 3, Link::kNeighbor,
+			Transform(0.9f, 0.95f, 0, 0, 0, 1.20f), parityInfo6(0.47, 3.0)));
+	links.emplace(1, Link(1, 3, Link::kGlobalClosure,
+			Transform(1.85f, 1.20f, 0, 0, 0, 1.35f), parityInfo6(0.71, 2.5)));
+
+	expectParity(true, poses, links);
+}
+
+// finalError / iterationsDone / outputCovariance are optional outputs; the
+// solve and its result must not depend on which of them the caller asked
+// for (rtabmap-export passes none of them).
+TEST(AraelCeresParityTest, NullOutputArgumentsMatch)
+{
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1.05f, 0.1f, 0, 0, 0, 0.15f));
+	poses.emplace(3, Transform(1.9f, 1.1f, 0, 0, 0, 1.4f));
+
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor,
+			Transform(1.0f, 0.0f, 0, 0, 0, 0.10f), parityInfo6(0.13, 2.0)));
+	links.emplace(2, Link(2, 3, Link::kNeighbor,
+			Transform(0.9f, 0.95f, 0, 0, 0, 1.20f), parityInfo6(0.47, 3.0)));
+	links.emplace(1, Link(1, 3, Link::kGlobalClosure,
+			Transform(1.85f, 1.20f, 0, 0, 0, 1.35f), parityInfo6(0.71, 2.5)));
+
+	std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeArael));
+	opt->setSlam2d(true);
+	opt->setIterations(100);
+	opt->setEpsilon(0.0);
+
+	cv::Mat cov;
+	double err = -1.0;
+	int iters = 0;
+	std::map<int, Transform> withOutputs =
+			opt->optimize(1, poses, links, cov, 0, &err, &iters);
+	std::map<int, Transform> withoutOutputs = opt->optimize(1, poses, links);
+
+	ASSERT_FALSE(withOutputs.empty());
+	ASSERT_EQ(withOutputs.size(), withoutOutputs.size());
+	EXPECT_GT(iters, 0);
+	EXPECT_GT(err, 0.0);
+	for(const auto & kv : withOutputs)
+	{
+		ASSERT_TRUE(withoutOutputs.count(kv.first));
+		EXPECT_EQ(kv.second.getDistance(withoutOutputs.at(kv.first)), 0.0f)
+				<< "pose " << kv.first;
+	}
+}
+
+TEST(AraelCeresParityTest, AgreeOnCorrelated3DGraph)
+{
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1.0f, 0.1f, 0.2f, 0.10f, -0.05f, 0.30f));
+	poses.emplace(3, Transform(1.8f, 1.0f, 0.5f, -0.20f, 0.15f, 1.10f));
+
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor,
+			Transform(0.95f, 0.05f, 0.25f, 0.12f, -0.02f, 0.28f), parityInfo6(0.23, 2.0)));
+	links.emplace(2, Link(2, 3, Link::kNeighbor,
+			Transform(0.85f, 0.90f, 0.20f, -0.30f, 0.22f, 0.85f), parityInfo6(0.59, 3.0)));
+	links.emplace(1, Link(1, 3, Link::kGlobalClosure,
+			Transform(1.75f, 1.10f, 0.55f, -0.15f, 0.18f, 1.05f), parityInfo6(0.83, 2.5)));
+
+	expectParity(false, poses, links);
+}
+
+// ---------------------------------------------------------------------------
+// Arael/Preset: parameter plumbing and that every preset reaches the same
+// optimum (presets trade damping/termination strategy, not the cost function).
+// ---------------------------------------------------------------------------
+
+TEST(AraelPresetTest, ParameterPlumbing)
+{
+	{
+		std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeArael));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).preset(),
+				Parameters::defaultAraelPreset());
+	}
+	{
+		ParametersMap params;
+		params[Parameters::kAraelPreset()] = "1";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).preset(), 1);
+	}
+	{
+		// out-of-range values fall back to the default
+		ParametersMap params;
+		params[Parameters::kAraelPreset()] = "7";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).preset(),
+				Parameters::defaultAraelPreset());
+	}
+	{
+		ParametersMap params;
+		params[Parameters::kAraelInitialLambda()] = "0.0001";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).initialLambda(), 0.0001);
+	}
+	{
+		// negative falls back to 0 (= use the preset's value)
+		ParametersMap params;
+		params[Parameters::kAraelInitialLambda()] = "-1";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).initialLambda(), 0.0);
+	}
+}
+
+TEST(AraelPresetTest, AllPresetsReachSameOptimum)
+{
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1.05f, 0.1f, 0, 0, 0, 0.15f));
+	poses.emplace(3, Transform(1.9f, 1.1f, 0, 0, 0, 1.4f));
+
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor,
+			Transform(1.0f, 0.0f, 0, 0, 0, 0.10f), parityInfo6(0.13, 2.0)));
+	links.emplace(2, Link(2, 3, Link::kNeighbor,
+			Transform(0.9f, 0.95f, 0, 0, 0, 1.20f), parityInfo6(0.47, 3.0)));
+	links.emplace(1, Link(1, 3, Link::kGlobalClosure,
+			Transform(1.85f, 1.20f, 0, 0, 0, 1.35f), parityInfo6(0.71, 2.5)));
+
+	double costs[3] = {0, 0, 0};
+	for(int preset = 1; preset <= 3; ++preset)
+	{
+		ParametersMap params;
+		params[Parameters::kAraelPreset()] = uNumber2Str(preset);
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		opt->setSlam2d(true);
+		opt->setIterations(100);
+		opt->setEpsilon(0.0);
+		cv::Mat cov;
+		std::map<int, Transform> out = opt->optimize(1, poses, links, cov);
+		ASSERT_FALSE(out.empty()) << "preset " << preset;
+		costs[preset - 1] = ceresRefCost2d(out, links);
+	}
+	EXPECT_NEAR(costs[1], costs[0], 1e-6 * costs[0]);
+	EXPECT_NEAR(costs[2], costs[0], 1e-6 * costs[0]);
+
+	// an initial-lambda override changes the path, not the optimum
+	{
+		ParametersMap params;
+		params[Parameters::kAraelInitialLambda()] = "0.01";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		opt->setSlam2d(true);
+		opt->setIterations(100);
+		opt->setEpsilon(0.0);
+		cv::Mat cov;
+		std::map<int, Transform> out = opt->optimize(1, poses, links, cov);
+		ASSERT_FALSE(out.empty());
+		EXPECT_NEAR(ceresRefCost2d(out, links), costs[0], 1e-6 * costs[0]);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AraelRobustTest -- parameter plumbing for the robust loss, and the Cauchy
+// variant of the corrupted-loop-closure recovery (the Geman-McClure default
+// runs in CircleGraphBadLoopClosureTest/Arael_Robust).
+// ---------------------------------------------------------------------------
+
+TEST(AraelRobustTest, ParameterPlumbing)
+{
+	{
+		std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeArael));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).robustLoss(),
+				Parameters::defaultAraelRobustLoss());
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).robustC2(),
+				Parameters::defaultAraelRobustC2());
+	}
+	{
+		ParametersMap params;
+		params[Parameters::kAraelRobustLoss()] = "1";
+		params[Parameters::kAraelRobustC2()] = "4.0";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).robustLoss(), 1);
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).robustC2(), 4.0);
+	}
+	{
+		// out-of-range values fall back
+		ParametersMap params;
+		params[Parameters::kAraelRobustLoss()] = "5";
+		params[Parameters::kAraelRobustC2()] = "-1";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).robustLoss(),
+				Parameters::defaultAraelRobustLoss());
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).robustC2(), 0.0);
+	}
+}
+
+TEST(AraelRobustTest, CauchySuppressesCorruptedLoopClosure)
+{
+	ParametersMap params;
+	params[Parameters::kOptimizerStrategy()] =
+			uNumber2Str(static_cast<int>(Optimizer::kTypeArael));
+	params[Parameters::kRegForce3DoF()]              = "false";
+	params[Parameters::kOptimizerGravitySigma()]     = "0";
+	params[Parameters::kOptimizerPriorsIgnored()]    = "true";
+	params[Parameters::kOptimizerLandmarksIgnored()] = "true";
+	params[Parameters::kOptimizerRobust()]           = "true";
+	params[Parameters::kAraelRobustLoss()]           = "1"; // Cauchy
+	std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+	ASSERT_EQ(opt->type(), Optimizer::kTypeArael);
+
+	CircleGraph g = buildCircleGraph(/*noisy=*/true);
+	std::multimap<int, Link> corruptedLinks;
+	for(const auto & kv : g.links)
+	{
+		if(kv.second.type() == Link::kGlobalClosure)
+		{
+			const Transform & t = kv.second.transform();
+			float r, p, y;
+			t.getEulerAngles(r, p, y);
+			const Transform bad(t.x() + 5.0f, t.y(), t.z(), r, p, y);
+			corruptedLinks.insert({kv.first,
+					Link(kv.second.from(), kv.second.to(), kv.second.type(),
+							bad, kv.second.infMatrix())});
+		}
+		else
+		{
+			corruptedLinks.insert(kv);
+		}
+	}
+
+	std::map<int, Transform> connectedPoses;
+	std::multimap<int, Link> inLinks;
+	opt->getConnectedGraph(1, g.poses, corruptedLinks, connectedPoses, inLinks);
+	std::map<int, Transform> out = opt->optimize(1, g.poses, inLinks);
+	ASSERT_FALSE(out.empty());
+
+	float worstPoseD = 0.0f;
+	for(const auto & kv : g.truePoses)
+	{
+		if(kv.first < 0) continue;
+		ASSERT_TRUE(out.count(kv.first));
+		worstPoseD = std::max(worstPoseD, out.at(kv.first).getDistance(kv.second));
+	}
+	// Cauchy bounds the outlier's influence but never switches it off: its
+	// log tail keeps enough slope that the optimum trades ~0.5 m of chain
+	// deformation against the 5 m corruption (measured 0.47 m; the solve
+	// converges cleanly and the closure's cost saturates). Geman-McClure's
+	// squared re-descending weight suppresses the same closure to
+	// millimeters -- that contract is tested at the Vertigo bar in
+	// CircleGraphBadLoopClosureTest/Arael_Robust. Here the bar is bounded
+	// influence: an order of magnitude under the 5 m non-robust deformation.
+	EXPECT_LT(worstPoseD, 1.0f) << "worstPoseD=" << worstPoseD;
+	EXPECT_GT(worstPoseD, 0.005f) << "unexpectedly tight for Cauchy;"
+			" if the loss changed, revisit the bounds (worstPoseD="
+			<< worstPoseD << ")";
+}
+
+// ---------------------------------------------------------------------------
+// AraelPriorTest -- position-only priors (the GPS shape: angular variance
+// marked unused with the 9999 convention). Full-pose priors are covered by
+// the CircleGraphTest prior variants, which perturb every orientation and
+// require the priors to recover them.
+// ---------------------------------------------------------------------------
+
+TEST(AraelPriorTest, PositionPriorPullsAndIgnoreFlagDisables)
+{
+	// 3-pose chain along +X; a position-only prior on pose 3 says it is
+	// actually 0.5 m further out. Odometry disagrees; the prior must win
+	// part of the tug according to the weights.
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1, 0, 0, 0, 0, 0));
+	poses.emplace(3, Transform(2, 0, 0, 0, 0, 0));
+
+	cv::Mat odomInfo = cv::Mat::eye(6, 6, CV_64FC1) * 100.0;
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor, Transform(1, 0, 0, 0, 0, 0), odomInfo));
+	links.emplace(2, Link(2, 3, Link::kNeighbor, Transform(1, 0, 0, 0, 0, 0), odomInfo));
+
+	// position info 400/axis, angular variance 9999 -> position-only
+	cv::Mat priorInfo = cv::Mat::eye(6, 6, CV_64FC1) * 400.0;
+	priorInfo.at<double>(3,3) = 1.0 / 9999.0;
+	priorInfo.at<double>(4,4) = 1.0 / 9999.0;
+	priorInfo.at<double>(5,5) = 1.0 / 9999.0;
+	links.emplace(3, Link(3, 3, Link::kPosePrior, Transform(2.5f, 0, 0, 0, 0, 0), priorInfo));
+
+	auto solve = [&](bool priorsIgnored) {
+		ParametersMap params;
+		params[Parameters::kOptimizerPriorsIgnored()] = priorsIgnored ? "true" : "false";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		opt->setSlam2d(false);
+		opt->setIterations(100);
+		opt->setEpsilon(0.0);
+		cv::Mat cov;
+		return opt->optimize(1, poses, links, cov);
+	};
+
+	std::map<int, Transform> ignored = solve(true);
+	ASSERT_FALSE(ignored.empty());
+	EXPECT_NEAR(ignored.at(3).x(), 2.0f, 1e-4) << "prior must have no effect when ignored";
+
+	std::map<int, Transform> used = solve(false);
+	ASSERT_FALSE(used.empty());
+	// with the root free (priors anchor the gauge), the odometry links stay
+	// satisfied and the WHOLE chain shifts onto the prior: no residual is
+	// left anywhere
+	EXPECT_NEAR(used.at(3).x(), 2.5f, 1e-3);
+	EXPECT_NEAR(used.at(1).x(), 0.5f, 1e-3);
+
+	// same graph on g2o, if available: both must agree on the equilibrium
+	if(Optimizer::isAvailable(Optimizer::kTypeG2O))
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerPriorsIgnored()] = "false";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeG2O, params));
+		opt->setSlam2d(false);
+		opt->setIterations(100);
+		opt->setEpsilon(0.0);
+		cv::Mat cov;
+		std::map<int, Transform> g2oOut = opt->optimize(1, poses, links, cov);
+		ASSERT_FALSE(g2oOut.empty());
+		for(const auto & kv : used)
+		{
+			ASSERT_TRUE(g2oOut.count(kv.first));
+			EXPECT_LT(kv.second.getDistance(g2oOut.at(kv.first)), 0.01)
+					<< "pose " << kv.first;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AraelLandmarkTest -- point landmarks (the 9999-angular-variance shape;
+// pose landmarks are covered by the CircleGraphTest landmark variants).
+// ---------------------------------------------------------------------------
+
+TEST(AraelLandmarkTest, PointLandmarkConvergesAndMatchesG2o)
+{
+	// two poses observe one point landmark (id -1) with disagreeing
+	// measurements; the optimizer must settle it at the weighted middle
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1, 0, 0, 0, 0, 0));
+	poses.emplace(-1, Transform(1.0f, 1.0f, 0, 0, 0, 0));
+
+	cv::Mat odomInfo = cv::Mat::eye(6, 6, CV_64FC1) * 100.0;
+	cv::Mat lmInfo = cv::Mat::eye(6, 6, CV_64FC1) * 100.0;
+	lmInfo.at<double>(3,3) = 1.0 / 9999.0; // point landmark marker
+	lmInfo.at<double>(4,4) = 1.0 / 9999.0;
+	lmInfo.at<double>(5,5) = 1.0 / 9999.0;
+
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor, Transform(1, 0, 0, 0, 0, 0), odomInfo));
+	// from pose 1 the landmark is measured at (1.0, 1.1); from pose 2 at
+	// (0.0, 0.9) -- inconsistent by 0.2 m in y. Landmark links are stored
+	// landmark -> pose (the buildCircleGraph convention g2o depends on).
+	links.emplace(-1, Link(-1, 1, Link::kLandmark, Transform(-1.0f, -1.1f, 0, 0, 0, 0), lmInfo));
+	links.emplace(-1, Link(-1, 2, Link::kLandmark, Transform(0.0f, -0.9f, 0, 0, 0, 0), lmInfo));
+
+	auto solve = [&](Optimizer::Type type, bool ignored) {
+		ParametersMap params;
+		params[Parameters::kOptimizerLandmarksIgnored()] = ignored ? "true" : "false";
+		std::unique_ptr<Optimizer> opt(Optimizer::create(type, params));
+		opt->setSlam2d(false);
+		opt->setIterations(100);
+		opt->setEpsilon(0.0);
+		cv::Mat cov;
+		return opt->optimize(1, poses, links, cov);
+	};
+
+	std::map<int, Transform> ignored = solve(Optimizer::kTypeArael, true);
+	ASSERT_FALSE(ignored.empty());
+	EXPECT_EQ(ignored.count(-1), 0u) << "landmark must be dropped when ignored";
+
+	std::map<int, Transform> used = solve(Optimizer::kTypeArael, false);
+	ASSERT_FALSE(used.empty());
+	ASSERT_EQ(used.count(-1), 1u) << "landmark must be optimized and returned";
+	// pose 2 is free, so the 0.2 m disagreement splits between moving the
+	// landmark and bending the chain: minimizing dy^2 + (y-1.1)^2 +
+	// (y-dy-0.9)^2 over landmark y and pose-2 shift dy (equal weights)
+	// gives y = 31/30, dy = 1/15
+	EXPECT_NEAR(used.at(-1).x(), 1.0f, 1e-3);
+	EXPECT_NEAR(used.at(-1).y(), 31.0f / 30.0f, 1e-3);
+	EXPECT_NEAR(used.at(2).y(), 1.0f / 15.0f, 1e-3);
+
+	if(Optimizer::isAvailable(Optimizer::kTypeG2O))
+	{
+		std::map<int, Transform> g2oOut = solve(Optimizer::kTypeG2O, false);
+		ASSERT_FALSE(g2oOut.empty());
+		ASSERT_EQ(g2oOut.count(-1), 1u);
+		for(const auto & kv : used)
+		{
+			ASSERT_TRUE(g2oOut.count(kv.first));
+			EXPECT_LT(kv.second.getDistance(g2oOut.at(kv.first)), 0.01)
+					<< "id " << kv.first;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AraelMarginalCovarianceTest -- outputCovariance is the marginal of the
+// newest pose, validated against an independent dense computation: numeric
+// Jacobians of the whitened residuals with respect to body-frame twist
+// perturbations (rotation-first, the same tangent convention GTSAM uses),
+// root pose excluded, H = J^T J inverted, last-pose block permuted to
+// rtabmap's translation-first order.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// double-precision pose (Transform is float32; the numeric Jacobians below
+// need exact double arithmetic around the solved point)
+struct DPose
+{
+	Eigen::Quaterniond q;
+	Eigen::Vector3d p;
+};
+
+// residual stack of all links at the given poses (3D ceres convention)
+Eigen::VectorXd residualStack3d(const std::map<int, DPose> & poses,
+		const std::multimap<int, Link> & links)
+{
+	Eigen::VectorXd r(6 * links.size());
+	int row = 0;
+	for(const auto & kv : links)
+	{
+		const Link & l = kv.second;
+		const DPose & A = poses.at(l.from());
+		const DPose & B = poses.at(l.to());
+		Eigen::Matrix<double, 6, 6> info;
+		for(int i = 0; i < 6; ++i)
+			for(int j = 0; j < 6; ++j)
+				info(i, j) = l.infMatrix().at<double>(i, j);
+		const Eigen::Matrix<double, 6, 6> S = info.llt().matrixU();
+		const Eigen::Quaterniond qm = l.transform().getQuaterniond();
+		const Eigen::Vector3d tm(l.transform().x(), l.transform().y(), l.transform().z());
+		Eigen::Matrix<double, 6, 1> ri;
+		ri.head<3>() = A.q.conjugate() * (B.p - A.p) - tm;
+		const Eigen::Quaterniond dq = qm * (A.q.conjugate() * B.q).conjugate();
+		ri.tail<3>() = 2.0 * dq.vec();
+		r.segment<6>(row) = S * ri;
+		row += 6;
+	}
+	return r;
+}
+
+// body-frame twist perturbation, rotation-first: R <- R * R(w), t <- t + R * d
+DPose perturbBodyTwist(const DPose & T, const Eigen::Matrix<double, 6, 1> & wd)
+{
+	const Eigen::Vector3d w = wd.head<3>();
+	const Eigen::Vector3d d = wd.tail<3>();
+	Eigen::AngleAxisd aa(w.norm(), w.norm() > 0 ? Eigen::Vector3d(w.normalized())
+											    : Eigen::Vector3d::UnitX());
+	DPose out;
+	out.q = (T.q * Eigen::Quaterniond(aa)).normalized();
+	out.p = T.p + T.q.toRotationMatrix() * d;
+	return out;
+}
+
+// dense marginal of the highest-id pose (translation-first 6x6), root fixed
+Eigen::Matrix<double, 6, 6> denseMarginal3d(const std::map<int, Transform> & posesIn,
+		const std::multimap<int, Link> & links,
+		int rootId)
+{
+	std::map<int, DPose> poses;
+	for(const auto & kv : posesIn)
+	{
+		poses.emplace(kv.first,
+				DPose{kv.second.getQuaterniond(),
+					  Eigen::Vector3d(kv.second.x(), kv.second.y(), kv.second.z())});
+	}
+	std::vector<int> freeIds;
+	for(const auto & kv : poses)
+	{
+		if(kv.first != rootId)
+		{
+			freeIds.push_back(kv.first);
+		}
+	}
+	const int n = 6 * freeIds.size();
+	const double eps = 1e-6;
+	Eigen::MatrixXd J(residualStack3d(poses, links).size(), n);
+	for(size_t i = 0; i < freeIds.size(); ++i)
+	{
+		for(int k = 0; k < 6; ++k)
+		{
+			Eigen::Matrix<double, 6, 1> wd = Eigen::Matrix<double, 6, 1>::Zero();
+			std::map<int, DPose> plus = poses, minus = poses;
+			wd(k) = eps;
+			plus.at(freeIds[i]) = perturbBodyTwist(poses.at(freeIds[i]), wd);
+			wd(k) = -eps;
+			minus.at(freeIds[i]) = perturbBodyTwist(poses.at(freeIds[i]), wd);
+			J.col(6 * i + k) =
+				(residualStack3d(plus, links) - residualStack3d(minus, links)) / (2.0 * eps);
+		}
+	}
+	const Eigen::MatrixXd H = J.transpose() * J;
+	const Eigen::MatrixXd cov = H.ldlt().solve(
+			Eigen::MatrixXd::Identity(n, n));
+	// last-pose block, permuted rotation-first -> translation-first
+	const int o = n - 6;
+	Eigen::Matrix<double, 6, 6> wd = cov.block<6, 6>(o, o);
+	Eigen::Matrix<double, 6, 6> out;
+	out.block<3, 3>(0, 0) = wd.block<3, 3>(3, 3);
+	out.block<3, 3>(3, 3) = wd.block<3, 3>(0, 0);
+	out.block<3, 3>(0, 3) = wd.block<3, 3>(3, 0);
+	out.block<3, 3>(3, 0) = wd.block<3, 3>(0, 3);
+	return out;
+}
+
+}  // namespace
+
+TEST(AraelMarginalCovarianceTest, MatchesDenseReference3D)
+{
+	std::map<int, Transform> poses;
+	poses.emplace(1, Transform(0, 0, 0, 0, 0, 0));
+	poses.emplace(2, Transform(1.0f, 0.1f, 0.2f, 0.10f, -0.05f, 0.30f));
+	poses.emplace(3, Transform(1.8f, 1.0f, 0.5f, -0.20f, 0.15f, 1.10f));
+
+	std::multimap<int, Link> links;
+	links.emplace(1, Link(1, 2, Link::kNeighbor,
+			Transform(0.95f, 0.05f, 0.25f, 0.12f, -0.02f, 0.28f), parityInfo6(0.23, 2.0)));
+	links.emplace(2, Link(2, 3, Link::kNeighbor,
+			Transform(0.85f, 0.90f, 0.20f, -0.30f, 0.22f, 0.85f), parityInfo6(0.59, 3.0)));
+	links.emplace(1, Link(1, 3, Link::kGlobalClosure,
+			Transform(1.75f, 1.10f, 0.55f, -0.15f, 0.18f, 1.05f), parityInfo6(0.83, 2.5)));
+
+	std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeArael));
+	opt->setSlam2d(false);
+	opt->setIterations(100);
+	opt->setEpsilon(0.0);
+	cv::Mat cov;
+	std::map<int, Transform> out = opt->optimize(1, poses, links, cov);
+	ASSERT_FALSE(out.empty());
+	ASSERT_EQ(cov.rows, 6);
+	ASSERT_EQ(cov.cols, 6);
+
+	// dense reference at the SOLVED poses (the marginal is evaluated there)
+	const Eigen::Matrix<double, 6, 6> ref = denseMarginal3d(out, links, 1);
+	for(int i = 0; i < 6; ++i)
+	{
+		for(int j = 0; j < 6; ++j)
+		{
+			// float32 poses limit the agreement; scale by the diagonal
+			const double scale = std::sqrt(ref(i, i) * ref(j, j));
+			EXPECT_NEAR(cov.at<double>(i, j), ref(i, j), 1e-3 * scale)
+					<< "entry (" << i << "," << j << ")";
+		}
+	}
+	// a marginal, not identity (the Ceres back-end's placeholder)
+	EXPECT_NE(cov.at<double>(0, 0), 1.0);
+}
+
+TEST(AraelMarginalCovarianceTest, GrowsAlongChainAndNearGtsam)
+{
+	// 12-pose noiseless chain with slight yaw: accumulated uncertainty must
+	// grow monotonically with distance from the anchored root, and (with the
+	// graph dwarfing GTSAM's soft root prior) land near GTSAM's marginal.
+	std::map<int, Transform> poses;
+	std::multimap<int, Link> links;
+	Transform T = Transform::getIdentity();
+	poses.emplace(1, T);
+	const Transform step(1.0f, 0.0f, 0.05f, 0.0f, 0.02f, 0.1f);
+	for(int id = 2; id <= 12; ++id)
+	{
+		T = T * step;
+		poses.emplace(id, T);
+		links.emplace(id - 1, Link(id - 1, id, Link::kNeighbor, step,
+				parityInfo6(0.1 * id, 4.0)));
+	}
+
+	auto lastVariance = [&](Optimizer::Type type) {
+		std::unique_ptr<Optimizer> opt(Optimizer::create(type));
+		opt->setSlam2d(false);
+		opt->setIterations(100);
+		opt->setEpsilon(0.0);
+		cv::Mat cov;
+		std::map<int, Transform> out = opt->optimize(1, poses, links, cov);
+		EXPECT_FALSE(out.empty()) << optimizerTypeName(type);
+		return cov;
+	};
+
+	cv::Mat araelCov = lastVariance(Optimizer::kTypeArael);
+	const double traceArael = araelCov.at<double>(0,0) + araelCov.at<double>(1,1) +
+			araelCov.at<double>(2,2);
+	EXPECT_GT(traceArael, 0.0);
+
+	if(Optimizer::isAvailable(Optimizer::kTypeGTSAM))
+	{
+		cv::Mat gtsamCov = lastVariance(Optimizer::kTypeGTSAM);
+		const double traceGtsam = gtsamCov.at<double>(0,0) + gtsamCov.at<double>(1,1) +
+				gtsamCov.at<double>(2,2);
+		// GTSAM anchors with a soft prior (1e-2 variances) where arael holds
+		// the root hard, so agreement is loose by construction
+		EXPECT_GT(traceArael, 0.5 * traceGtsam);
+		EXPECT_LT(traceArael, 2.0 * traceGtsam);
+	}
+}
+
+#endif  // RTABMAP_ARAEL
+#endif  // RTABMAP_CERES

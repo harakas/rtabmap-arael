@@ -41,6 +41,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <rtabmap/core/optimizer/OptimizerGTSAM.h>
 #include <rtabmap/core/optimizer/OptimizerCVSBA.h>
 #include <rtabmap/core/optimizer/OptimizerCeres.h>
+#include <rtabmap/core/optimizer/OptimizerArael.h>
 
 namespace rtabmap {
 
@@ -66,6 +67,10 @@ bool Optimizer::isAvailable(Optimizer::Type type)
 	{
 		return OptimizerCeres::available();
 	}
+	else if(type == Optimizer::kTypeArael)
+	{
+		return OptimizerArael::available();
+	}
 	return false;
 }
 
@@ -78,7 +83,7 @@ Optimizer * Optimizer::create(const ParametersMap & parameters)
 
 Optimizer * Optimizer::create(Optimizer::Type type, const ParametersMap & parameters)
 {
-	UASSERT_MSG(OptimizerG2O::available() || OptimizerGTSAM::available() || OptimizerTORO::available() || OptimizerCeres::available(),
+	UASSERT_MSG(OptimizerG2O::available() || OptimizerGTSAM::available() || OptimizerTORO::available() || OptimizerCeres::available() || OptimizerArael::available(),
 			"RTAB-Map is not built with any graph optimization approach!");
 
 	if(!OptimizerTORO::available() && type == Optimizer::kTypeTORO)
@@ -161,6 +166,29 @@ Optimizer * Optimizer::create(Optimizer::Type type, const ParametersMap & parame
 					type = Optimizer::kTypeTORO;
 		}
 	}
+	if(!OptimizerArael::available() && type == Optimizer::kTypeArael)
+	{
+		if(OptimizerGTSAM::available())
+		{
+			UWARN("arael optimizer not available. GTSAM will be used instead.");
+					type = Optimizer::kTypeGTSAM;
+		}
+		else if(OptimizerG2O::available())
+		{
+			UWARN("arael optimizer not available. g2o will be used instead.");
+					type = Optimizer::kTypeG2O;
+		}
+		else if(OptimizerCeres::available())
+		{
+			UWARN("arael optimizer not available. ceres will be used instead.");
+					type = Optimizer::kTypeCeres;
+		}
+		else if(OptimizerTORO::available())
+		{
+			UWARN("arael optimizer not available. TORO will be used instead.");
+					type = Optimizer::kTypeTORO;
+		}
+	}
 	Optimizer * optimizer = 0;
 	switch(type)
 	{
@@ -175,6 +203,9 @@ Optimizer * Optimizer::create(Optimizer::Type type, const ParametersMap & parame
 		break;
 	case Optimizer::kTypeCeres:
 		optimizer = new OptimizerCeres(parameters);
+		break;
+	case Optimizer::kTypeArael:
+		optimizer = new OptimizerArael(parameters);
 		break;
 	case Optimizer::kTypeTORO:
 	default:

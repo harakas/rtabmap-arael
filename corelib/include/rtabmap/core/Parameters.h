@@ -450,28 +450,28 @@ class RTABMAP_CORE_EXPORT Parameters
 
     // Graph optimization
 #ifdef RTABMAP_GTSAM
-    RTABMAP_PARAM(Optimizer, Strategy,        int, 2,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM and 3=Ceres.");
+    RTABMAP_PARAM(Optimizer, Strategy,        int, 2,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM, 3=Ceres and 5=arael.");
     RTABMAP_PARAM(Optimizer, Iterations,      int, 20,         "Optimization iterations.");
     RTABMAP_PARAM(Optimizer, Epsilon,         double, 0.00001, "Stop optimizing when the error improvement is less than this value.");
 #else
 #ifdef RTABMAP_G2O
-    RTABMAP_PARAM(Optimizer, Strategy,        int, 1,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM and 3=Ceres.");
+    RTABMAP_PARAM(Optimizer, Strategy,        int, 1,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM, 3=Ceres and 5=arael.");
     RTABMAP_PARAM(Optimizer, Iterations,      int, 30,         "Optimization iterations.");
     RTABMAP_PARAM(Optimizer, Epsilon,         double, 0.0,     "Stop optimizing when the error improvement is less than this value.");
 #else
 #ifdef RTABMAP_CERES
-    RTABMAP_PARAM(Optimizer, Strategy,        int, 3,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM and 3=Ceres.");
+    RTABMAP_PARAM(Optimizer, Strategy,        int, 3,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM, 3=Ceres and 5=arael.");
     RTABMAP_PARAM(Optimizer, Iterations,      int, 20,         "Optimization iterations.");
     RTABMAP_PARAM(Optimizer, Epsilon,         double, 0.000001, "Stop optimizing when the error improvement is less than this value.");
 #else
-    RTABMAP_PARAM(Optimizer, Strategy,        int, 0,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM and 3=Ceres.");
+    RTABMAP_PARAM(Optimizer, Strategy,        int, 0,          "Graph optimization strategy: 0=TORO, 1=g2o, 2=GTSAM, 3=Ceres and 5=arael.");
     RTABMAP_PARAM(Optimizer, Iterations,      int, 100,        "Optimization iterations.");
     RTABMAP_PARAM(Optimizer, Epsilon,         double, 0.00001, "Stop optimizing when the error improvement is less than this value.");
 #endif
 #endif
 #endif
     RTABMAP_PARAM(Optimizer, VarianceIgnored, bool, false,     "Ignore constraints' variance. If checked, identity information matrix is used for each constraint. Otherwise, an information matrix is generated from the variance saved in the links.");
-    RTABMAP_PARAM(Optimizer, Robust,          bool, false,     "Robust graph optimization using Vertigo (only work for g2o and GTSAM optimization strategies).");
+    RTABMAP_PARAM(Optimizer, Robust,          bool, false,     "Robust graph optimization: Vertigo switchable constraints with the g2o and GTSAM strategies, a robust loss on loop-closure links with the arael strategy (see Arael/RobustLoss).");
     RTABMAP_PARAM(Optimizer, PriorsIgnored,   bool, true,      "Ignore prior constraints (global pose, GPS or marker priors) while optimizing. Currently only g2o and gtsam optimization supports this.");
     RTABMAP_PARAM(Optimizer, LandmarksIgnored,   bool, false,  "Ignore landmark constraints while optimizing. Currently only g2o and gtsam optimization supports this.");
 #if defined(RTABMAP_G2O) || defined(RTABMAP_GTSAM)
@@ -496,6 +496,16 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(GTSAM, Incremental,     bool, false,     uFormat("Do graph optimization incrementally (iSAM2) to increase optimization speed on loop closures. Note that only GaussNewton and Dogleg optimization algorithms are supported (%s) in this mode.", kGTSAMOptimizer().c_str()));
     RTABMAP_PARAM(GTSAM, IncRelinearizeThreshold,  double, 0.01, "Only relinearize variables whose linear delta magnitude is greater than this threshold. See GTSAM::ISAM2 doc for more info.");
     RTABMAP_PARAM(GTSAM, IncRelinearizeSkip,       int, 1, "Only relinearize any variables every X calls to ISAM2::update(). See GTSAM::ISAM2 doc for more info.");
+
+    // arael parameters
+    RTABMAP_PARAM(Arael, Preset,          int, 2,          "arael damping and termination preset: 1=conservative, 2=well conditioned, 3=ill conditioned.");
+    RTABMAP_PARAM(Arael, InitialLambda,   double, 0.0,     uFormat("Initial Levenberg-Marquardt damping. 0 means use the preset's value (see %s).", kAraelPreset().c_str()));
+    RTABMAP_PARAM(Arael, RobustLoss,      int, 0,          uFormat("Robust loss applied to loop-closure links when %s is enabled: 0=Geman-McClure, 1=Cauchy.", kOptimizerRobust().c_str()));
+    RTABMAP_PARAM(Arael, RobustC2,        double, 0.0,     uFormat("Squared scale of the robust loss, acting on the squared norm of the sqrt-information-weighted residual. 0 means the loss-specific default (2.99 for Geman-McClure, 1.5 for Cauchy). See %s.", kAraelRobustLoss().c_str()));
+    RTABMAP_PARAM(Arael, BaSolve,         int, 0,          "Linear solver of the arael bundle adjustment: 0=auto (Schur reduction when it pays, direct Cholesky), 1=conjugate gradients on the reduced camera system (like Ceres' ITERATIVE_SCHUR).");
+    RTABMAP_PARAM(Arael, BaRobustLoss,    int, 1,          uFormat("Robust loss on the arael bundle adjustment observations when %s is not 0: 0=Geman-McClure, 1=Cauchy, 2=Huber. The loss down-weights outliers during the solve; nothing is removed.", kOptimizerRobustKernelDelta().c_str()));
+    RTABMAP_PARAM(Arael, BaRobustC2,      double, 256.0,   "Squared scale of the arael bundle adjustment robust loss, on the squared norm of the whitened residual (units set by Optimizer/PixelVariance and Optimizer/DisparityVariance). Also the threshold above which observations are reported as outliers.");
+    RTABMAP_PARAM(Arael, BaPruneChi2,     double, 0.0,     "0 (default): single robust solve, outliers only reported. If >0: after the first converged solve, observations with squared whitened residual above this value are removed and the problem is re-solved (converge-prune-refine).");
 
     // Odometry
     RTABMAP_PARAM(Odom, Strategy,               int, 0,       "0=Frame-to-Map (F2M) 1=Frame-to-Frame (F2F) 2=Fovis 3=viso2 4=DVO-SLAM 5=ORB_SLAM 6=OKVIS 7=LOAM 8=MSCKF_VIO 9=VINS-Fusion 10=OpenVINS 11=FLOAM 12=Open3D 13=cuVSLAM 14=LIO-SAM");
@@ -531,9 +541,9 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(OdomF2M, ScanRange,           float, 0,     "[Geometry] Distance Range used to filter points of local map (when > 0). 0 means local map is updated using time and not range.");
     RTABMAP_PARAM(OdomF2M, ValidDepthRatio,     float, 0.75,  "If a new frame has points without valid depth, they are added to local feature map only if points with valid depth on total points is over this ratio. Setting to 1 means no points without valid depth are added to local feature map.");
 #if defined(RTABMAP_G2O) || defined(RTABMAP_ORB_SLAM)
-    RTABMAP_PARAM(OdomF2M, BundleAdjustment,          int, 1, uFormat("Local bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba.", kOptimizerStrategy().c_str()));
+    RTABMAP_PARAM(OdomF2M, BundleAdjustment,          int, 1, uFormat("Local bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba, 5=arael.", kOptimizerStrategy().c_str()));
 #else
-    RTABMAP_PARAM(OdomF2M, BundleAdjustment,          int, 0, uFormat("Local bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba.", kOptimizerStrategy().c_str()));
+    RTABMAP_PARAM(OdomF2M, BundleAdjustment,          int, 0, uFormat("Local bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba, 5=arael.", kOptimizerStrategy().c_str()));
 #endif
     RTABMAP_PARAM(OdomF2M, BundleAdjustmentMaxFrames, int, 10, "Maximum frames used for bundle adjustment (0=inf or all current frames in the local map).");
     RTABMAP_PARAM(OdomF2M, BundleAdjustmentMinMotion, float, 0.0, "To create a new keyframe with bundle adjustment, a minimum motion (in pixels) can be required. The motion is computed by the average distance between inliers of the previous keyframe and new frame.");
@@ -795,9 +805,9 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(Vis, CorFlowErrorThreshold,     float, 20,    uFormat("[%s=false] Filter out features with error greater than this threshold.", kVisCorFlowUseMinEigenVals().c_str()));
     RTABMAP_PARAM(Vis, CorFlowGpu,                bool,  false, uFormat("[%s=1] Enable GPU version of the optical flow approach (only available if OpenCV is built with CUDA). Note that %s is not used in the GPU implementation.", kVisCorType().c_str(), kVisCorFlowUseMinEigenVals().c_str()));
     #if defined(RTABMAP_G2O) || defined(RTABMAP_ORB_SLAM)
-    RTABMAP_PARAM(Vis, BundleAdjustment,          int,   1,     uFormat("Optimization with bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba.", kOptimizerStrategy().c_str()));
+    RTABMAP_PARAM(Vis, BundleAdjustment,          int,   1,     uFormat("Optimization with bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba, 5=arael.", kOptimizerStrategy().c_str()));
 #else
-    RTABMAP_PARAM(Vis, BundleAdjustment,          int,   0,     uFormat("Optimization with bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba.", kOptimizerStrategy().c_str()));
+    RTABMAP_PARAM(Vis, BundleAdjustment,          int,   0,     uFormat("Optimization with bundle adjustment. Value matches the %s parameter: 0=disabled (TORO is not BA-capable), 1=g2o, 2=GTSAM, 3=Ceres, 4=cvsba, 5=arael.", kOptimizerStrategy().c_str()));
 #endif
 
     // Features matching approaches
