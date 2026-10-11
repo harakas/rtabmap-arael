@@ -3477,6 +3477,23 @@ TEST_F(AraelBaOutlierReportTest, KeepsWithinBaRobustC2)
 // (~1e-7 relative slack; see kParityRelTol).
 
 #ifdef RTABMAP_CERES
+
+namespace {
+
+void expectSamePoses(const std::map<int, Transform> & a,
+		const std::map<int, Transform> & b, const std::string & what)
+{
+	ASSERT_EQ(a.size(), b.size()) << what;
+	for(const auto & kv : a)
+	{
+		ASSERT_TRUE(b.count(kv.first)) << what << " pose " << kv.first;
+		EXPECT_LT(kv.second.getDistance(b.at(kv.first)), 1e-4f) << what << " pose " << kv.first;
+		EXPECT_LT(kv.second.getAngle(b.at(kv.first)), 1e-4f) << what << " pose " << kv.first;
+	}
+}
+
+} // namespace
+
 #ifdef RTABMAP_ARAEL
 
 #include <Eigen/Cholesky>
@@ -3846,22 +3863,6 @@ TEST(AraelThreadsTest, ParameterPlumbing)
 		EXPECT_FALSE(dynamic_cast<OptimizerArael &>(*opt2).poseGraphSingleThread());
 	}
 }
-
-namespace {
-
-void expectSamePoses(const std::map<int, Transform> & a,
-		const std::map<int, Transform> & b, const std::string & what)
-{
-	ASSERT_EQ(a.size(), b.size()) << what;
-	for(const auto & kv : a)
-	{
-		ASSERT_TRUE(b.count(kv.first)) << what << " pose " << kv.first;
-		EXPECT_LT(kv.second.getDistance(b.at(kv.first)), 1e-4f) << what << " pose " << kv.first;
-		EXPECT_LT(kv.second.getAngle(b.at(kv.first)), 1e-4f) << what << " pose " << kv.first;
-	}
-}
-
-} // namespace
 
 TEST(AraelThreadsTest, ThreadedPoseGraphMatchesSingleThreaded)
 {
@@ -4365,4 +4366,89 @@ TEST(AraelMarginalCovarianceTest, GrowsAlongChainAndNearGtsam)
 }
 
 #endif  // RTABMAP_ARAEL
+
+// ---------------------------------------------------------------------------
+// Ceres/Threads and Ceres/PoseGraphSingleThread: parameter plumbing, and
+// threaded solves agreeing with the single-threaded ones to rounding.
+// ---------------------------------------------------------------------------
+
+#include <rtabmap/core/optimizer/OptimizerCeres.h>
+
+TEST(CeresThreadsTest, ParameterPlumbing)
+{
+	{
+		std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeCeres));
+		EXPECT_EQ(dynamic_cast<OptimizerCeres &>(*opt).threads(), 1);
+		EXPECT_TRUE(dynamic_cast<OptimizerCeres &>(*opt).poseGraphSingleThread());
+	}
+	{
+		ParametersMap params;
+		params[Parameters::kCeresThreads()] = "4";
+		params[Parameters::kCeresPoseGraphSingleThread()] = "false";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeCeres, params));
+		EXPECT_EQ(dynamic_cast<OptimizerCeres &>(*opt).threads(), 4);
+		EXPECT_FALSE(dynamic_cast<OptimizerCeres &>(*opt).poseGraphSingleThread());
+	}
+	{
+		// below 1 falls back to 1
+		ParametersMap params;
+		params[Parameters::kCeresThreads()] = "0";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeCeres, params));
+		EXPECT_EQ(dynamic_cast<OptimizerCeres &>(*opt).threads(), 1);
+	}
+}
+
+TEST(CeresThreadsTest, ThreadedPoseGraphMatchesSingleThreaded)
+{
+	for(int mode = 0; mode < 2; ++mode)
+	{
+		const bool slam2d = mode == 0;
+		const std::string what = slam2d ? "2d" : "3d";
+		CircleGraph g = buildCircleGraph(/*noisy=*/true, 1, slam2d);
+		std::map<int, Transform> out[2];
+		const int threads[2] = {1, 4};
+		for(int i = 0; i < 2; ++i)
+		{
+			ParametersMap params;
+			params[Parameters::kCeresThreads()]              = uNumber2Str(threads[i]);
+			params[Parameters::kCeresPoseGraphSingleThread()] = "false";
+			params[Parameters::kRegForce3DoF()]              = slam2d ? "true" : "false";
+			params[Parameters::kOptimizerGravitySigma()]     = "0";
+			params[Parameters::kOptimizerPriorsIgnored()]    = "true";
+			params[Parameters::kOptimizerLandmarksIgnored()] = "true";
+			params[Parameters::kOptimizerIterations()]       = "100";
+			std::unique_ptr<Optimizer> opt(
+					Optimizer::create(Optimizer::kTypeCeres, params));
+			cv::Mat cov;
+			out[i] = opt->optimize(1, g.poses, g.links, cov);
+			ASSERT_FALSE(out[i].empty()) << what << " threads " << threads[i];
+		}
+		expectSamePoses(out[0], out[1], what);
+	}
+}
+
+TEST(CeresThreadsTest, ThreadedBundleAdjustmentMatchesSingleThreaded)
+{
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+	std::map<int, Transform> out[2];
+	const int threads[2] = {1, 4};
+	for(int i = 0; i < 2; ++i)
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerStrategy()] =
+				uNumber2Str(static_cast<int>(Optimizer::kTypeCeres));
+		params[Parameters::kCeresThreads()]        = uNumber2Str(threads[i]);
+		params[Parameters::kOptimizerIterations()] = "200";
+		params[Parameters::kOptimizerBaseline()]   = "0.15";
+		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+		std::map<int, cv::Point3f> points = g.initialPoints3D;
+		out[i] = opt->optimizeBA(
+				/*rootId=*/1, g.initialPoses, g.links, g.models, points, g.wordReferences);
+		ASSERT_FALSE(out[i].empty()) << "threads " << threads[i];
+	}
+	expectSamePoses(out[0], out[1], "BA");
+}
+
 #endif  // RTABMAP_CERES

@@ -103,7 +103,9 @@ OptimizerCeres::OptimizerCeres(const ParametersMap & parameters) :
 		pixelVariance_(Parameters::defaultOptimizerPixelVariance()),
 		disparityVariance_(Parameters::defaultOptimizerDisparityVariance()),
 		robustKernelDelta_(Parameters::defaultOptimizerRobustKernelDelta()),
-		baseline_(Parameters::defaultOptimizerBaseline())
+		baseline_(Parameters::defaultOptimizerBaseline()),
+		threads_(Parameters::defaultCeresThreads()),
+		poseGraphSingleThread_(Parameters::defaultCeresPoseGraphSingleThread())
 {
 	parseParameters(parameters);
 }
@@ -115,6 +117,14 @@ void OptimizerCeres::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kOptimizerDisparityVariance(), disparityVariance_);
 	Parameters::parse(parameters, Parameters::kOptimizerRobustKernelDelta(), robustKernelDelta_);
 	Parameters::parse(parameters, Parameters::kOptimizerBaseline(),          baseline_);
+	Parameters::parse(parameters, Parameters::kCeresThreads(), threads_);
+	if(threads_ < 1)
+	{
+		UWARN("%s=%d is invalid (must be >=1), using 1.",
+			Parameters::kCeresThreads().c_str(), threads_);
+		threads_ = 1;
+	}
+	Parameters::parse(parameters, Parameters::kCeresPoseGraphSingleThread(), poseGraphSingleThread_);
 	UASSERT(pixelVariance_ > 0.0);
 	UASSERT(disparityVariance_ > 0.0);
 	UASSERT(baseline_ >= 0.0);
@@ -309,6 +319,7 @@ std::map<int, Transform> OptimizerCeres::optimize(
 		UINFO("Ceres optimizing begin (iterations=%d)", iterations());
 
 		ceres::Solver::Options options;
+		options.num_threads = poseGraphSingleThread_ ? 1 : threads_;
 		// SPARSE_NORMAL_CHOLESKY is the standard linear solver for
 		// pose-graph SLAM: the Hessian is a sparse symmetric positive
 		// definite matrix over pose blocks, which Cholesky factors
@@ -845,6 +856,7 @@ std::map<int, Transform> OptimizerCeres::optimizeBA(
 	// standard solver, SPARSE_NORMAL_CHOLESKY, also works fine but it is slower
 	// for standard bundle adjustment problems.
 	ceres::Solver::Options options;
+	options.num_threads = threads_;
 	options.linear_solver_type = ceres::ITERATIVE_SCHUR;
 	options.max_num_iterations = iterations();
 	//options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;

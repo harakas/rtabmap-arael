@@ -497,6 +497,9 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(GTSAM, IncRelinearizeThreshold,  double, 0.01, "Only relinearize variables whose linear delta magnitude is greater than this threshold. See GTSAM::ISAM2 doc for more info.");
     RTABMAP_PARAM(GTSAM, IncRelinearizeSkip,       int, 1, "Only relinearize any variables every X calls to ISAM2::update(). See GTSAM::ISAM2 doc for more info.");
 
+    RTABMAP_PARAM(Ceres, Threads,         int, 1,          uFormat("Threads of a Ceres solve, Ceres' Solver::Options::num_threads. Applies to bundle adjustment, and to graph optimization when %s is false. The sparse factorization's BLAS can use threads of its own, set by the OPENBLAS_NUM_THREADS or OMP_NUM_THREADS environment variables.", kCeresPoseGraphSingleThread().c_str()));
+    RTABMAP_PARAM(Ceres, PoseGraphSingleThread, bool, true,    uFormat("Run graph optimization on one thread, whatever %s asks for. Bundle adjustment is not affected.", kCeresThreads().c_str()));
+
     // arael parameters
     RTABMAP_PARAM(Arael, Preset,          int, 2,          "arael damping and termination preset: 1=conservative, 2=well conditioned, 3=ill conditioned.");
     RTABMAP_PARAM(Arael, InitialLambda,   double, 0.0,     uFormat("Initial Levenberg-Marquardt damping. 0 means use the preset's value (see %s).", kAraelPreset().c_str()));

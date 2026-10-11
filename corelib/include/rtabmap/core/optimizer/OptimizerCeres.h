@@ -47,13 +47,23 @@ public:
 		pixelVariance_(Parameters::defaultOptimizerPixelVariance()),
 		disparityVariance_(Parameters::defaultOptimizerDisparityVariance()),
 		robustKernelDelta_(Parameters::defaultOptimizerRobustKernelDelta()),
-		baseline_(Parameters::defaultOptimizerBaseline()) {}
+		baseline_(Parameters::defaultOptimizerBaseline()),
+		threads_(Parameters::defaultCeresThreads()),
+		poseGraphSingleThread_(Parameters::defaultCeresPoseGraphSingleThread()) {}
 	OptimizerCeres(const ParametersMap & parameters);
 	virtual ~OptimizerCeres() {}
 
 	virtual Type type() const {return kTypeCeres;}
 
 	virtual void parseParameters(const ParametersMap & parameters);
+
+	/** @brief Solve threads, Ceres' Solver::Options::num_threads
+	 *  (see Ceres/Threads). */
+	int threads() const {return threads_;}
+
+	/** @brief Whether graph optimization runs on one thread whatever
+	 *  threads() says (see Ceres/PoseGraphSingleThread). */
+	bool poseGraphSingleThread() const {return poseGraphSingleThread_;}
 
 	virtual std::map<int, Transform> optimize(
 			int rootId,
@@ -78,6 +88,8 @@ private:
 	double disparityVariance_;
 	double robustKernelDelta_;
 	double baseline_;
+	int threads_;
+	bool poseGraphSingleThread_;
 };
 
 } /* namespace rtabmap */
