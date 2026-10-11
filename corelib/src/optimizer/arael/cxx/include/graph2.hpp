@@ -48,6 +48,14 @@ using arael::SolveFailure;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::ThreadReport;
+using arael::AraelVersion;
+using arael::SweepReport;
+using arael::PhaseChoice;
+using arael::ParTiming;
+using arael::PhaseTiming;
+using arael::FormTiming;
+using arael::StoreFootprint;
 using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
@@ -295,18 +303,26 @@ const char* graph2_last_error(const Graph2*);
 bool graph2_last_failure(const Graph2*, SolveFailure*);
 const char* graph2_validate(Graph2*);
 void graph2_set_log_level(uint32_t);
+void graph2_pool_shutdown(void);
+void graph2_arael_version(AraelVersion*);
 void graph2_sparse_options(SparseOptions*);
 int32_t graph2_solve_dense(Graph2*, const LmConfig*, LmResultT<double>*);
 int32_t graph2_solve_sparse(Graph2*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
 const char* graph2_result_report(void*, bool);
 bool graph2_result_plan(const void*, SchurPlan*);
 uint64_t graph2_result_steps(const void*, LmStep*, uint64_t);
+void graph2_result_threads(const void*, ThreadReport*);
+uint64_t graph2_result_threads_held(const void*, StoreFootprint*, uint64_t);
+int32_t graph2_result_covariance(void*, Graph2Cov**);
+const char* graph2_result_error(const void*);
 void graph2_result_free(void*);
 struct Graph2Session;
 Graph2Session* graph2_session_new(const SparseOptions*);
 void graph2_session_free(Graph2Session*);
 void graph2_session_invalidate(Graph2Session*);
 int32_t graph2_session_solve(Graph2Session*, Graph2*, const LmConfig*, LmResultT<double>*);
+int32_t graph2_session_assemble_covariance(Graph2Session*, Graph2*, uint32_t, Graph2Cov**);
+int32_t graph2_session_assemble_covariance_with(Graph2Session*, Graph2*, uint32_t, uint32_t, uint32_t, Graph2Cov**);
 }
 } // namespace ffi
 
@@ -324,12 +340,29 @@ inline void set_log_level(LogLevel level) {
     ffi::graph2_set_log_level(uint32_t(level));
 }
 
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide. Without the `threads` feature no
+/// worker is ever spawned and it returns at once.
+inline void pool_shutdown() {
+    ffi::graph2_pool_shutdown();
+}
+
+/// The arael version the shim was built with (arael::AraelVersion).
+inline AraelVersion arael_version() {
+    AraelVersion v{};
+    ffi::graph2_arael_version(&v);
+    return v;
+}
+
+class Covariance;
+
 /// A completed solve: the plain result fields plus ownership of the
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data, steps() the per-attempt timeline. Copies share
-/// ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline, threads() what
+/// the threads did, covariance() the covariance the config asked for.
+/// Copies share ownership of the Rust result.
 class LmResult : public LmResultT<double> {
 public:
     LmResult() : LmResultT<double>() {}
@@ -364,16 +397,40 @@ public:
             ffi::graph2_result_steps(detail, out.data(), out.size());
         return out;
     }
+    /// What the solve's threads did (Rust's ThreadReport).
+    ThreadReport threads() const {
+        ThreadReport t{};
+        if (detail)
+            ffi::graph2_result_threads(detail, &t);
+        return t;
+    }
+    /// What each split store held (Rust's SweepReport::held); empty
+    /// without a threaded sweep.
+    std::vector<StoreFootprint> threads_held() const {
+        std::vector<StoreFootprint> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::graph2_result_threads_held(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::graph2_result_threads_held(detail, out.data(), out.size());
+        return out;
+    }
+    /// The covariance the config asked for (LmConfig::covariance),
+    /// assembled at the solution, moved out of the result into the
+    /// view; the error names why there is none (the config did not
+    /// ask, an earlier call took it, or the assembly failed).
+    result<Covariance, CovError> covariance() const;
 
 private:
     std::shared_ptr<void> guard_;
 };
 
-/// The Err side of a solve: SolverFailed, the text from
-/// last_error() (valid until the next call on the model), the
-/// best accepted state before the break when the solve got that
+/// The Err side of a solve (Rust's SolveFailure): SolverFailed, the
+/// text from last_error() (valid until the next call on the model),
+/// the best accepted state before the break when the solve got that
 /// far, and the structured failure (which kind, which parameter /
-/// row / block index) in `failure`.
+/// row / block index) in `failure`, Rust's SolveFailureKind with the
+/// setup error's data flattened in.
 struct SolveError {
     LmStatus status;
     const char* message;
@@ -640,6 +697,18 @@ private:
     ffi::Graph2Cov* c_;
     std::shared_ptr<void> guard_;
 };
+
+inline result<Covariance, CovError> LmResult::covariance() const {
+    ffi::Graph2Cov* c = nullptr;
+    int32_t code = detail ? ffi::graph2_result_covariance(detail, &c) : 1;
+    if (code == 0)
+        return result<Covariance, CovError>::ok(Covariance(c));
+    if (code == 1)
+        return result<Covariance, CovError>::err({"no covariance: the config did not ask for one"});
+    if (code == 2)
+        return result<Covariance, CovError>::err({"no covariance: an earlier covariance() call took it"});
+    return result<Covariance, CovError>::err({ffi::graph2_result_error(detail)});
+}
 
 /// `Graph2.poses`. Element pointers are STABLE across pushes (chunked storage).
 class Graph2PosesVec {
@@ -1168,9 +1237,10 @@ private:
 /// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
 /// the analysis -- pattern, ordering, symbolic factorization, Schur
 /// plan -- across solves, so only the first pays for it. Warm solves
-/// are bit-identical to cold ones. A parameter-count change
-/// re-analyzes by itself; call invalidate() after a structural change
-/// at the same count (solving warm through one is undefined).
+/// are bit-identical to cold ones. Call invalidate() after any
+/// structural change: a changed parameter or block count without it
+/// fails the solve, and a change that keeps every count solves warm
+/// through stale analysis (undefined).
 /// Move-only.
 class LmSession {
 public:
@@ -1197,6 +1267,20 @@ public:
     }
     /// Drop the learned structure; the next solve runs cold.
     void invalidate() { ffi::graph2_session_invalidate(s_); }
+    /// The covariance at the model's current parameters, reusing what
+    /// this session's solves built. Contract as
+    /// Graph2::assemble_covariance.
+    result<Covariance, CovError> assemble_covariance(Graph2& m, CovMode mode = CovMode::AllMarginals,
+                                                     const CovOptions& opts = CovOptions{}) {
+        ffi::Graph2Cov* c = nullptr;
+        int32_t code = ffi::graph2_session_assemble_covariance_with(
+            s_, m.h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
+        if (code == -2) throw PanicError(m.last_error());
+        if (code != 0)
+            return result<Covariance, CovError>::err({m.last_error()});
+        return result<Covariance, CovError>::ok(Covariance(c));
+    }
 
 private:
     ffi::Graph2Session* s_;

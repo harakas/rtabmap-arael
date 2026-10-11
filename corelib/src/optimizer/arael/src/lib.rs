@@ -12,8 +12,63 @@ use arael::angle::AngleParam;
 use arael::matrix::matrix3d;
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
+use arael::sym::{matrix2sym, matrix3sym, vect2sym, vect3sym, E};
 use arael::transform::TransformParam;
 use arael::vect::{vect2d, vect3d};
+
+/// A 3-row residual whitened by the upper-triangular square root
+/// `[s00 s01 s02; 0 s11 s12; 0 0 s22]` of its information matrix.
+#[arael::function]
+fn whiten3(r0: E, r1: E, r2: E, s00: E, s01: E, s02: E, s11: E, s12: E, s22: E) -> [E; 3] {
+    [s00 * r0 + s01 * r1 + s02 * r2,
+     s11 * r1 + s12 * r2,
+     s22 * r2]
+}
+
+/// The SE2 error of pose b in pose a's frame against the measurement
+/// `(dx, dy, dth)`: translation, then the wrapped heading.
+#[arael::function]
+fn se2_err(pa: vect2sym, ra: matrix2sym, tha: E, pb: vect2sym, thb: E, dx: E, dy: E, dth: E) -> (E, E, E) {
+    let local = ra.transpose() * (pb - pa);
+    (local.x - dx, local.y - dy, rad_diff(thb, tha + dth))
+}
+
+/// The doubled vector part of the quaternion of rotation matrix `r`.
+// `.row(i)` rather than `[i]`: arael 0.9.0 does not compile an indexed
+// read inside a typed function.
+#[arael::function]
+fn quat_vec2(r: matrix3sym) -> vect3sym {
+    let s = r - r.transpose();
+    let denom = safe_sqrt(r.row(0).x + r.row(1).y + r.row(2).z + 1.0);
+    vect3sym::from_components(s.row(2).y / denom, s.row(0).z / denom, s.row(1).x / denom)
+}
+
+/// A 6-row residual `[t; rot]` whitened by the upper-triangular square
+/// root `[u_tt u_tr; 0 u_rr]` of its information matrix.
+#[arael::function]
+fn whiten6(t: vect3sym, rot: vect3sym, u_tt: matrix3sym, u_tr: matrix3sym, u_rr: matrix3sym) -> [E; 6] {
+    let wt = u_tt * t + u_tr * rot;
+    let wr = u_rr * rot;
+    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
+}
+
+/// The whitened SE3 error of pose b in pose a's frame against the
+/// measurement `(dt, rmeas)`; the rotation error is the doubled vector
+/// part of `rmeas * (ra^T rb)^-1`.
+#[arael::function]
+fn se3_err(ta: vect3sym, ra: matrix3sym, tb: vect3sym, rb: matrix3sym, dt: vect3sym, rmeas: matrix3sym,
+           u_tt: matrix3sym, u_tr: matrix3sym, u_rr: matrix3sym) -> [E; 6] {
+    let terr = ra.transpose() * (tb - ta) - dt;
+    let rrot = quat_vec2(rmeas * (rb.transpose() * ra));
+    whiten6(terr, rrot, u_tt, u_tr, u_rr)
+}
+
+/// The whitened pixel error of camera-frame point `p` against the
+/// pixel `(u, v)`, pre-centered on the principal point.
+#[arael::function]
+fn reproj(p: vect3sym, fx: E, fy: E, u: E, v: E, w: E) -> (E, E) {
+    ((fx * (p.x / p.z) - u) * w, (fy * (p.y / p.z) - v) * w)
+}
 
 /// A 2D pose; the heading is optimized directly as an angle.
 ///
@@ -22,12 +77,8 @@ use arael::vect::{vect2d, vect3d};
 /// only (x, y; `ps00`, `ps01`, `ps11`).
 #[arael::model]
 #[arael(constraint(hb, name = "prior_full", guard = self.prior_mode == 1, {
-    let r0 = pose2.pos.x - pose2.pr_x;
-    let r1 = pose2.pos.y - pose2.pr_y;
-    let r2 = rad_diff(pose2.rot.angle, pose2.pr_th);
-    [pose2.ps00 * r0 + pose2.ps01 * r1 + pose2.ps02 * r2,
-     pose2.ps11 * r1 + pose2.ps12 * r2,
-     pose2.ps22 * r2]
+    whiten3(pose2.pos.x - pose2.pr_x, pose2.pos.y - pose2.pr_y, rad_diff(pose2.rot.angle, pose2.pr_th),
+            pose2.ps00, pose2.ps01, pose2.ps02, pose2.ps11, pose2.ps12, pose2.ps22)
 }))]
 #[arael(constraint(hb, name = "prior_pos", guard = self.prior_mode == 2, {
     let r0 = pose2.pos.x - pose2.pr_x;
@@ -57,13 +108,9 @@ pub struct Pose2 {
 /// upper-triangular square root of the 3x3 information matrix, row major.
 #[arael::model]
 #[arael(constraint(hb, {
-    let local = a.rot.rotation_matrix.transpose() * (b.pos - a.pos);
-    let r0 = local.x - edge2.dx;
-    let r1 = local.y - edge2.dy;
-    let r2 = rad_diff(b.rot.angle, a.rot.angle + edge2.dth);
-    [edge2.s00 * r0 + edge2.s01 * r1 + edge2.s02 * r2,
-     edge2.s11 * r1 + edge2.s12 * r2,
-     edge2.s22 * r2]
+    let (r0, r1, r2) = se2_err(a.pos, a.rot.rotation_matrix, a.rot.angle, b.pos, b.rot.angle,
+                               edge2.dx, edge2.dy, edge2.dth);
+    whiten3(r0, r1, r2, edge2.s00, edge2.s01, edge2.s02, edge2.s11, edge2.s12, edge2.s22)
 }))]
 #[derive(Default)]
 pub struct Edge2 {
@@ -84,28 +131,17 @@ pub struct Edge2 {
 }
 
 /// A robustified SE2 closure: the Edge2 residual under a Geman-McClure
-/// (loss=1) or Cauchy (loss=2) loss with squared scale `c2`, applied to
+/// (loss=0) or Cauchy (loss=1) loss with squared scale `c2`, applied to
 /// the squared norm of the whitened residual.
 #[arael::model]
-#[arael(constraint(hb, name = "gm", guard = self.loss == 1,
-    loss = |s| loss_geman_mcclure(s, robustedge2.c2), {
-    let local = a.rot.rotation_matrix.transpose() * (b.pos - a.pos);
-    let r0 = local.x - robustedge2.dx;
-    let r1 = local.y - robustedge2.dy;
-    let r2 = rad_diff(b.rot.angle, a.rot.angle + robustedge2.dth);
-    [robustedge2.s00 * r0 + robustedge2.s01 * r1 + robustedge2.s02 * r2,
-     robustedge2.s11 * r1 + robustedge2.s12 * r2,
-     robustedge2.s22 * r2]
-}))]
-#[arael(constraint(hb, name = "cauchy", guard = self.loss == 2,
-    loss = |s| loss_cauchy(s, robustedge2.c2), {
-    let local = a.rot.rotation_matrix.transpose() * (b.pos - a.pos);
-    let r0 = local.x - robustedge2.dx;
-    let r1 = local.y - robustedge2.dy;
-    let r2 = rad_diff(b.rot.angle, a.rot.angle + robustedge2.dth);
-    [robustedge2.s00 * r0 + robustedge2.s01 * r1 + robustedge2.s02 * r2,
-     robustedge2.s11 * r1 + robustedge2.s12 * r2,
-     robustedge2.s22 * r2]
+#[arael(constraint(hb, loss = |s| match robustedge2.loss {
+    0 => loss_geman_mcclure(s, robustedge2.c2),
+    _ => loss_cauchy(s, robustedge2.c2),
+}, {
+    let (r0, r1, r2) = se2_err(a.pos, a.rot.rotation_matrix, a.rot.angle, b.pos, b.rot.angle,
+                               robustedge2.dx, robustedge2.dy, robustedge2.dth);
+    whiten3(r0, r1, r2, robustedge2.s00, robustedge2.s01, robustedge2.s02,
+            robustedge2.s11, robustedge2.s12, robustedge2.s22)
 }))]
 #[derive(Default)]
 pub struct RobustEdge2 {
@@ -181,14 +217,9 @@ pub struct Graph2 {
 /// part of `q_prior * q^-1`, like the edges.
 #[arael::model]
 #[arael(constraint(hb, name = "prior_full", guard = self.prior_mode == 1, {
-    let terr = pose3.pose.translation - pose3.pr_t;
-    let rerr = pose3.pr_r * pose3.pose.rotation_matrix.transpose();
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let wt = pose3.pu_tt * terr + pose3.pu_tr * rrot;
-    let wr = pose3.pu_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
+    whiten6(pose3.pose.translation - pose3.pr_t,
+            quat_vec2(pose3.pr_r * pose3.pose.rotation_matrix.transpose()),
+            pose3.pu_tt, pose3.pu_tr, pose3.pu_rr)
 }))]
 #[arael(constraint(hb, name = "prior_pos", guard = self.prior_mode == 2, {
     let wt = pose3.pu_tt * (pose3.pose.translation - pose3.pr_t);
@@ -199,12 +230,8 @@ pub struct Graph2 {
     [g.x * pose3.gw, g.y * pose3.gw, (g.z - 1.0) * pose3.gw]
 }))]
 #[arael(constraint(hb, name = "rot_anchor", guard = self.has_anchor, {
-    let e = pose3.pose.rotation_matrix.transpose() * pose3.an_r;
-    let s = e - e.transpose();
-    let denom = safe_sqrt(e[0].x + e[1].y + e[2].z + 1.0);
-    [(s[2].y / denom) * pose3.an_wrp,
-     (s[0].z / denom) * pose3.an_wrp,
-     (s[1].x / denom) * pose3.an_wyaw]
+    let e = quat_vec2(pose3.pose.rotation_matrix.transpose() * pose3.an_r);
+    [e.x * pose3.an_wrp, e.y * pose3.an_wrp, e.z * pose3.an_wyaw]
 }))]
 #[derive(Default)]
 pub struct Pose3 {
@@ -238,21 +265,11 @@ pub struct Pose3 {
 /// `dt` is the measured translation, `rmeas` the measured rotation
 /// matrix. `u_tt`, `u_tr`, `u_rr` are the blocks of the upper-triangular
 /// square root `S = [u_tt u_tr; 0 u_rr]` of the 6x6 information matrix,
-/// ordered translation then rotation. The rotation residual is the
-/// doubled vector part of `q_meas * q_estimated^-1`, extracted from the
-/// error rotation matrix.
+/// ordered translation then rotation.
 #[arael::model]
 #[arael(constraint(hb, {
-    let ra = a.pose.rotation_matrix;
-    let rb = b.pose.rotation_matrix;
-    let terr = ra.transpose() * (b.pose.translation - a.pose.translation) - edge3.dt;
-    let rerr = edge3.rmeas * (rb.transpose() * ra);
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let wt = edge3.u_tt * terr + edge3.u_tr * rrot;
-    let wr = edge3.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
+    se3_err(a.pose.translation, a.pose.rotation_matrix, b.pose.translation, b.pose.rotation_matrix,
+            edge3.dt, edge3.rmeas, edge3.u_tt, edge3.u_tr, edge3.u_rr)
 }))]
 #[derive(Default)]
 pub struct Edge3 {
@@ -269,34 +286,15 @@ pub struct Edge3 {
 }
 
 /// A robustified SE3 closure: the Edge3 residual under a Geman-McClure
-/// (loss=1) or Cauchy (loss=2) loss with squared scale `c2`, applied to
+/// (loss=0) or Cauchy (loss=1) loss with squared scale `c2`, applied to
 /// the squared norm of the whitened residual.
 #[arael::model]
-#[arael(constraint(hb, name = "gm", guard = self.loss == 1,
-    loss = |s| loss_geman_mcclure(s, robustedge3.c2), {
-    let ra = a.pose.rotation_matrix;
-    let rb = b.pose.rotation_matrix;
-    let terr = ra.transpose() * (b.pose.translation - a.pose.translation) - robustedge3.dt;
-    let rerr = robustedge3.rmeas * (rb.transpose() * ra);
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let wt = robustedge3.u_tt * terr + robustedge3.u_tr * rrot;
-    let wr = robustedge3.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
-}))]
-#[arael(constraint(hb, name = "cauchy", guard = self.loss == 2,
-    loss = |s| loss_cauchy(s, robustedge3.c2), {
-    let ra = a.pose.rotation_matrix;
-    let rb = b.pose.rotation_matrix;
-    let terr = ra.transpose() * (b.pose.translation - a.pose.translation) - robustedge3.dt;
-    let rerr = robustedge3.rmeas * (rb.transpose() * ra);
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let wt = robustedge3.u_tt * terr + robustedge3.u_tr * rrot;
-    let wr = robustedge3.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
+#[arael(constraint(hb, loss = |s| match robustedge3.loss {
+    0 => loss_geman_mcclure(s, robustedge3.c2),
+    _ => loss_cauchy(s, robustedge3.c2),
+}, {
+    se3_err(a.pose.translation, a.pose.rotation_matrix, b.pose.translation, b.pose.rotation_matrix,
+            robustedge3.dt, robustedge3.rmeas, robustedge3.u_tt, robustedge3.u_tr, robustedge3.u_rr)
 }))]
 #[derive(Default)]
 pub struct RobustEdge3 {
@@ -390,28 +388,19 @@ pub struct BaPoint {
 
 /// A mono reprojection observation: `u`, `v` are the pixel coordinates
 /// pre-centered on the principal point, `w_uv` = 1/sigma_pixel. `loss`
-/// selects the kernel on the squared residual norm: 0 = Huber with knee
-/// `k2` = delta^2 (a huge `k2` keeps it quadratic, i.e. no kernel),
-/// 1 = Geman-McClure, 2 = Cauchy, both with squared scale `k2`. Clearing
-/// `active` drops the observation (outlier rejection between passes).
+/// selects the kernel on the squared residual norm, with squared scale
+/// `k2`: 0 = Geman-McClure, 1 = Cauchy, 2 = Huber (knee `k2` = delta^2),
+/// 3 = none. Clearing `active` drops the observation (outlier rejection
+/// between passes).
 #[arael::model]
-#[arael(constraint(hb, name = "huber", guard = self.active && self.loss == 0,
-    loss = |s| loss_huber(s, baobs.k2), {
-    let p = cam.pose.rotation_matrix * point.pos + cam.pose.translation;
-    [(baobs.fx * (p.x / p.z) - baobs.u) * baobs.w_uv,
-     (baobs.fy * (p.y / p.z) - baobs.v) * baobs.w_uv]
-}))]
-#[arael(constraint(hb, name = "gm", guard = self.active && self.loss == 1,
-    loss = |s| loss_geman_mcclure(s, baobs.k2), {
-    let p = cam.pose.rotation_matrix * point.pos + cam.pose.translation;
-    [(baobs.fx * (p.x / p.z) - baobs.u) * baobs.w_uv,
-     (baobs.fy * (p.y / p.z) - baobs.v) * baobs.w_uv]
-}))]
-#[arael(constraint(hb, name = "cauchy", guard = self.active && self.loss == 2,
-    loss = |s| loss_cauchy(s, baobs.k2), {
-    let p = cam.pose.rotation_matrix * point.pos + cam.pose.translation;
-    [(baobs.fx * (p.x / p.z) - baobs.u) * baobs.w_uv,
-     (baobs.fy * (p.y / p.z) - baobs.v) * baobs.w_uv]
+#[arael(constraint(hb, guard = self.active, loss = |s| match baobs.loss {
+    0 => loss_geman_mcclure(s, baobs.k2),
+    1 => loss_cauchy(s, baobs.k2),
+    2 => loss_huber(s, baobs.k2),
+    _ => s,
+}, {
+    reproj(cam.pose.rotation_matrix * point.pos + cam.pose.translation,
+           baobs.fx, baobs.fy, baobs.u, baobs.v, baobs.w_uv)
 }))]
 #[derive(Default)]
 pub struct BaObs {
@@ -434,26 +423,15 @@ pub struct BaObs {
 /// `bfx` = baseline * fx, `d` the observed disparity, `w_d` = 1/sigma_d.
 /// `loss` as in [`BaObs`].
 #[arael::model]
-#[arael(constraint(hb, name = "huber", guard = self.active && self.loss == 0,
-    loss = |s| loss_huber(s, bastereoobs.k2), {
+#[arael(constraint(hb, guard = self.active, loss = |s| match bastereoobs.loss {
+    0 => loss_geman_mcclure(s, bastereoobs.k2),
+    1 => loss_cauchy(s, bastereoobs.k2),
+    2 => loss_huber(s, bastereoobs.k2),
+    _ => s,
+}, {
     let p = cam.pose.rotation_matrix * point.pos + cam.pose.translation;
-    [(bastereoobs.fx * (p.x / p.z) - bastereoobs.u) * bastereoobs.w_uv,
-     (bastereoobs.fy * (p.y / p.z) - bastereoobs.v) * bastereoobs.w_uv,
-     (bastereoobs.bfx / p.z - bastereoobs.d) * bastereoobs.w_d]
-}))]
-#[arael(constraint(hb, name = "gm", guard = self.active && self.loss == 1,
-    loss = |s| loss_geman_mcclure(s, bastereoobs.k2), {
-    let p = cam.pose.rotation_matrix * point.pos + cam.pose.translation;
-    [(bastereoobs.fx * (p.x / p.z) - bastereoobs.u) * bastereoobs.w_uv,
-     (bastereoobs.fy * (p.y / p.z) - bastereoobs.v) * bastereoobs.w_uv,
-     (bastereoobs.bfx / p.z - bastereoobs.d) * bastereoobs.w_d]
-}))]
-#[arael(constraint(hb, name = "cauchy", guard = self.active && self.loss == 2,
-    loss = |s| loss_cauchy(s, bastereoobs.k2), {
-    let p = cam.pose.rotation_matrix * point.pos + cam.pose.translation;
-    [(bastereoobs.fx * (p.x / p.z) - bastereoobs.u) * bastereoobs.w_uv,
-     (bastereoobs.fy * (p.y / p.z) - bastereoobs.v) * bastereoobs.w_uv,
-     (bastereoobs.bfx / p.z - bastereoobs.d) * bastereoobs.w_d]
+    let (ru, rv) = reproj(p, bastereoobs.fx, bastereoobs.fy, bastereoobs.u, bastereoobs.v, bastereoobs.w_uv);
+    [ru, rv, (bastereoobs.bfx / p.z - bastereoobs.d) * bastereoobs.w_d]
 }))]
 #[derive(Default)]
 pub struct BaStereoObs {
@@ -481,17 +459,10 @@ pub struct BaStereoObs {
 /// transposed), `u_*` the upper sqrt-information blocks [t; rot].
 #[arael::model]
 #[arael(constraint(hb, {
-    let ra = a.pose.rotation_matrix;
-    let rb = b.pose.rotation_matrix;
-    let rab = ra * rb.transpose();
-    let rerr = balink.rmeas_t * rab;
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let terr = a.pose.translation - rab * b.pose.translation - balink.dt;
-    let wt = balink.u_tt * terr + balink.u_tr * rrot;
-    let wr = balink.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
+    let rab = a.pose.rotation_matrix * b.pose.rotation_matrix.transpose();
+    whiten6(a.pose.translation - rab * b.pose.translation - balink.dt,
+            quat_vec2(balink.rmeas_t * rab),
+            balink.u_tt, balink.u_tr, balink.u_rr)
 }))]
 #[derive(Default)]
 pub struct BaLink {

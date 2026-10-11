@@ -48,6 +48,14 @@ using arael::SolveFailure;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
+using arael::ThreadReport;
+using arael::AraelVersion;
+using arael::SweepReport;
+using arael::PhaseChoice;
+using arael::ParTiming;
+using arael::PhaseTiming;
+using arael::FormTiming;
+using arael::StoreFootprint;
 using arael::SchurPolicy;
 using arael::FaerOrdering;
 using arael::EnvelopeMode;
@@ -278,18 +286,26 @@ const char* graph3_last_error(const Graph3*);
 bool graph3_last_failure(const Graph3*, SolveFailure*);
 const char* graph3_validate(Graph3*);
 void graph3_set_log_level(uint32_t);
+void graph3_pool_shutdown(void);
+void graph3_arael_version(AraelVersion*);
 void graph3_sparse_options(SparseOptions*);
 int32_t graph3_solve_dense(Graph3*, const LmConfig*, LmResultT<double>*);
 int32_t graph3_solve_sparse(Graph3*, const LmConfig*, const SparseOptions*, LmResultT<double>*);
 const char* graph3_result_report(void*, bool);
 bool graph3_result_plan(const void*, SchurPlan*);
 uint64_t graph3_result_steps(const void*, LmStep*, uint64_t);
+void graph3_result_threads(const void*, ThreadReport*);
+uint64_t graph3_result_threads_held(const void*, StoreFootprint*, uint64_t);
+int32_t graph3_result_covariance(void*, Graph3Cov**);
+const char* graph3_result_error(const void*);
 void graph3_result_free(void*);
 struct Graph3Session;
 Graph3Session* graph3_session_new(const SparseOptions*);
 void graph3_session_free(Graph3Session*);
 void graph3_session_invalidate(Graph3Session*);
 int32_t graph3_session_solve(Graph3Session*, Graph3*, const LmConfig*, LmResultT<double>*);
+int32_t graph3_session_assemble_covariance(Graph3Session*, Graph3*, uint32_t, Graph3Cov**);
+int32_t graph3_session_assemble_covariance_with(Graph3Session*, Graph3*, uint32_t, uint32_t, uint32_t, Graph3Cov**);
 }
 } // namespace ffi
 
@@ -307,12 +323,29 @@ inline void set_log_level(LogLevel level) {
     ffi::graph3_set_log_level(uint32_t(level));
 }
 
+/// Stop and join arael's sweep worker threads; the next threaded solve
+/// spawns them again. Process-wide. Without the `threads` feature no
+/// worker is ever spawned and it returns at once.
+inline void pool_shutdown() {
+    ffi::graph3_pool_shutdown();
+}
+
+/// The arael version the shim was built with (arael::AraelVersion).
+inline AraelVersion arael_version() {
+    AraelVersion v{};
+    ffi::graph3_arael_version(&v);
+    return v;
+}
+
+class Covariance;
+
 /// A completed solve: the plain result fields plus ownership of the
 /// full Rust result behind them. report()/pretty_report() render the
 /// Rust-side text (status, cost, the timing breakdown and the
 /// backend's plan when gathered); plan() returns the sparse backend's
-/// SchurPlan as data, steps() the per-attempt timeline. Copies share
-/// ownership of the Rust result.
+/// SchurPlan as data, steps() the per-attempt timeline, threads() what
+/// the threads did, covariance() the covariance the config asked for.
+/// Copies share ownership of the Rust result.
 class LmResult : public LmResultT<double> {
 public:
     LmResult() : LmResultT<double>() {}
@@ -347,16 +380,40 @@ public:
             ffi::graph3_result_steps(detail, out.data(), out.size());
         return out;
     }
+    /// What the solve's threads did (Rust's ThreadReport).
+    ThreadReport threads() const {
+        ThreadReport t{};
+        if (detail)
+            ffi::graph3_result_threads(detail, &t);
+        return t;
+    }
+    /// What each split store held (Rust's SweepReport::held); empty
+    /// without a threaded sweep.
+    std::vector<StoreFootprint> threads_held() const {
+        std::vector<StoreFootprint> out;
+        if (!detail)
+            return out;
+        out.resize(ffi::graph3_result_threads_held(detail, nullptr, 0));
+        if (!out.empty())
+            ffi::graph3_result_threads_held(detail, out.data(), out.size());
+        return out;
+    }
+    /// The covariance the config asked for (LmConfig::covariance),
+    /// assembled at the solution, moved out of the result into the
+    /// view; the error names why there is none (the config did not
+    /// ask, an earlier call took it, or the assembly failed).
+    result<Covariance, CovError> covariance() const;
 
 private:
     std::shared_ptr<void> guard_;
 };
 
-/// The Err side of a solve: SolverFailed, the text from
-/// last_error() (valid until the next call on the model), the
-/// best accepted state before the break when the solve got that
+/// The Err side of a solve (Rust's SolveFailure): SolverFailed, the
+/// text from last_error() (valid until the next call on the model),
+/// the best accepted state before the break when the solve got that
 /// far, and the structured failure (which kind, which parameter /
-/// row / block index) in `failure`.
+/// row / block index) in `failure`, Rust's SolveFailureKind with the
+/// setup error's data flattened in.
 struct SolveError {
     LmStatus status;
     const char* message;
@@ -460,6 +517,10 @@ public:
     void set_pose_optimize_translation(bool v) { ffi::graph3_pose3_pose_set_optimize_translation(h_, v); }
     bool pose_optimize_rotation() const { return ffi::graph3_pose3_pose_optimize_rotation(h_); }
     void set_pose_optimize_rotation(bool v) { ffi::graph3_pose3_pose_set_optimize_rotation(h_, v); }
+    /// `pose` as a live transform: `pose().translation()`, `pose().set_rotation(q)`, `pose() * x`, `pose().inv()`.
+    arael::TransformParamView<ffi::Pose3, double> pose() const {
+        return {h_, ffi::graph3_pose3_pose_translation, ffi::graph3_pose3_pose_set_translation, ffi::graph3_pose3_pose_rotation, ffi::graph3_pose3_pose_set_rotation, ffi::graph3_pose3_pose_optimize_translation, ffi::graph3_pose3_pose_set_optimize_translation, ffi::graph3_pose3_pose_optimize_rotation, ffi::graph3_pose3_pose_set_optimize_rotation};
+    }
     int32_t prior_mode() const { return ffi::graph3_pose3_prior_mode(h_); }
     void set_prior_mode(int32_t v) { ffi::graph3_pose3_set_prior_mode(h_, v); }
     vect3d pr_t() const { return ffi::graph3_pose3_pr_t(h_); }
@@ -603,6 +664,18 @@ private:
     ffi::Graph3Cov* c_;
     std::shared_ptr<void> guard_;
 };
+
+inline result<Covariance, CovError> LmResult::covariance() const {
+    ffi::Graph3Cov* c = nullptr;
+    int32_t code = detail ? ffi::graph3_result_covariance(detail, &c) : 1;
+    if (code == 0)
+        return result<Covariance, CovError>::ok(Covariance(c));
+    if (code == 1)
+        return result<Covariance, CovError>::err({"no covariance: the config did not ask for one"});
+    if (code == 2)
+        return result<Covariance, CovError>::err({"no covariance: an earlier covariance() call took it"});
+    return result<Covariance, CovError>::err({ffi::graph3_result_error(detail)});
+}
 
 /// `Graph3.poses`. Element pointers are STABLE across pushes (chunked storage).
 class Graph3PosesVec {
@@ -1131,9 +1204,10 @@ private:
 /// Warm reuse over repeated sparse solves (Rust's LmSession): keeps
 /// the analysis -- pattern, ordering, symbolic factorization, Schur
 /// plan -- across solves, so only the first pays for it. Warm solves
-/// are bit-identical to cold ones. A parameter-count change
-/// re-analyzes by itself; call invalidate() after a structural change
-/// at the same count (solving warm through one is undefined).
+/// are bit-identical to cold ones. Call invalidate() after any
+/// structural change: a changed parameter or block count without it
+/// fails the solve, and a change that keeps every count solves warm
+/// through stale analysis (undefined).
 /// Move-only.
 class LmSession {
 public:
@@ -1160,6 +1234,20 @@ public:
     }
     /// Drop the learned structure; the next solve runs cold.
     void invalidate() { ffi::graph3_session_invalidate(s_); }
+    /// The covariance at the model's current parameters, reusing what
+    /// this session's solves built. Contract as
+    /// Graph3::assemble_covariance.
+    result<Covariance, CovError> assemble_covariance(Graph3& m, CovMode mode = CovMode::AllMarginals,
+                                                     const CovOptions& opts = CovOptions{}) {
+        ffi::Graph3Cov* c = nullptr;
+        int32_t code = ffi::graph3_session_assemble_covariance_with(
+            s_, m.h_, uint32_t(mode), uint32_t(opts.ordering),
+            uint32_t(opts.block_supernodal), &c);
+        if (code == -2) throw PanicError(m.last_error());
+        if (code != 0)
+            return result<Covariance, CovError>::err({m.last_error()});
+        return result<Covariance, CovError>::ok(Covariance(c));
+    }
 
 private:
     ffi::Graph3Session* s_;

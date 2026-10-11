@@ -116,9 +116,10 @@ enum class DiagonalFault : int32_t {
     Zero = 2,
 };
 
-/// The structured failure behind a SolverFailed result: the kind and
-/// the indices a caller can act on (-1 where not applicable). Layout
-/// is part of the C ABI.
+/// The structured failure behind a SolverFailed result (Rust's
+/// SolveFailureKind with the setup error's data flattened in): the
+/// kind and the indices a caller can act on (-1 where not applicable).
+/// Layout is part of the C ABI.
 struct SolveFailure {
     SolveFailureKind kind = SolveFailureKind::None;
     /// DegenerateDiagonal only.
@@ -175,6 +176,10 @@ struct LmIterT {
     uint32_t params_len;
 };
 
+enum class CovMode : uint32_t;
+enum class CovOrdering : uint32_t;
+enum class BlockSupernodalMode : uint32_t;
+
 /// The solver configuration, holding the preset's Rust values.
 /// Inspect them, edit them, pass the struct back whole; `option`
 /// fields mirror the Rust `Option` fields (assign a value or `{}`).
@@ -204,6 +209,20 @@ struct LmConfigT {
     option<double> time_limit_seconds;
     bool (*observer)(void*, const LmIterT<F>*);
     void* observer_user;
+    /// Threads for the cost and assembly sweeps alone. Empty leaves them
+    /// on `num_threads`; a value gives the sweeps that count and leaves
+    /// the linear solve on `num_threads`.
+    option<uint32_t> assembly_threads;
+    /// Accepted steps after which the solve stops (status
+    /// MaxIterations). Empty turns it off.
+    option<uint32_t> max_accepted_iters;
+    /// Assemble the parameter covariance at the solution in this mode
+    /// and carry it in the result (LmResult::covariance()). Empty
+    /// assembles nothing.
+    option<CovMode> covariance;
+    /// How that covariance is assembled (Rust's CovOptions).
+    CovOrdering covariance_ordering;
+    BlockSupernodalMode covariance_block_supernodal;
 };
 
 /// Whether and when the sparse backend marginalizes (mirrors arael's
@@ -265,6 +284,7 @@ enum class SchurSolve : uint32_t {
 /// range list (the model's own marginalize hint covers it) and the
 /// iterative Schur routes.
 struct SparseOptionsT {
+    /// Whether and when to marginalize (Rust's `policy`).
     SchurPolicy schur;
     FaerOrdering ordering;
     EnvelopeMode envelope;
@@ -316,6 +336,9 @@ struct LmTiming {
     uint32_t linear_solve_count;
     uint32_t cost_eval_count;
     uint32_t advance_count;
+    /// The covariance assembly the config asked for, after the solve
+    /// and outside `total`; zero when none was asked.
+    double covariance;
 };
 
 /// One attempted LM step: the per-attempt timeline behind
@@ -423,6 +446,86 @@ struct SchurPlan {
     /// Factored by the block supernodal Cholesky rather than faer's
     /// scalar one, over the same system `envelope` refers to.
     bool block_supernodal;
+};
+
+/// One form's share of a sweep phase, summed over its calls (mirrors
+/// arael's FormTiming). Seconds.
+struct FormTiming {
+    uint32_t calls;
+    double region;
+    double task_sum;
+    double task_max;
+    double task_min;
+};
+
+/// A sweep phase's clocks: the dispatched calls and the ones run on
+/// the calling thread (mirrors arael's PhaseTiming).
+struct PhaseTiming {
+    FormTiming par;
+    FormTiming seq;
+};
+
+/// Where the sweeps' time went (mirrors arael's ParTiming); all zero
+/// unless the solve gathered timing, and `on` says which.
+struct ParTiming {
+    bool on;
+    double bind;
+    double assembly_update;
+    double assembly_zero;
+    PhaseTiming assembly;
+    double gather_grad;
+    double assembly_zero_vals;
+    double scatter;
+    double cost_update;
+    PhaseTiming cost;
+};
+
+/// What one store holds (mirrors arael's StoreFootprint).
+struct StoreFootprint {
+    uint64_t self_blocks;
+    uint64_t cross_blocks;
+    uint64_t coo_entries;
+    uint64_t bytes;
+};
+
+/// What one phase's sweeps did over a solve (mirrors arael's
+/// PhaseChoice): whether it was dispatched over the stores, and how
+/// many calls there were.
+struct PhaseChoice {
+    bool threaded;
+    uint32_t calls;
+};
+
+/// What the sweeps did (mirrors arael's SweepReport). `held` is the
+/// store count; LmResult::threads_held() reads the footprints.
+struct SweepReport {
+    uint32_t threads;
+    PhaseChoice assembly;
+    PhaseChoice cost;
+    ParTiming timing;
+    StoreFootprint whole;
+    uint32_t held;
+};
+
+/// What a solve's threads did (mirrors arael's ThreadReport); read it
+/// with LmResult::threads(). `sweeps` is absent when the model has no
+/// threaded sweep path. Layout is part of the C ABI.
+struct ThreadReport {
+    uint32_t sweeps_asked;
+    uint32_t linear;
+    bool fell_back;
+    option<SweepReport> sweeps;
+};
+
+/// The arael version a shim was built with (mirrors arael's Version):
+/// the three numbers and `pre`, the tag after the dash ("dev" in
+/// 0.9.0-dev, empty for a release); read it with arael_version().
+/// Layout is part of the C ABI.
+struct AraelVersion {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t patch;
+    const char* pre;
 };
 
 /// How much covariance to prepare (mirrors arael's CovMode).

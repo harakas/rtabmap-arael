@@ -13,6 +13,7 @@
 #include <graph2.hpp>
 #include <graph3.hpp>
 #include <ba_graph.hpp>
+#include <arael/eigen.hpp>
 
 #include <algorithm>
 #endif
@@ -132,9 +133,9 @@ std::map<int, Transform> optimize2d(
 		bool covarianceIgnored,
 		bool priorsIgnored,
 		bool landmarksIgnored,
-		int robustMode, // 0=off, 1=Geman-McClure, 2=Cauchy (closures only)
+		int closureLoss, // -1=off, 0=Geman-McClure, 1=Cauchy (closures only)
 		double robustC2,
-		const rtabmap_arael::graph2::LmConfig & cfg,
+		rtabmap_arael::graph2::LmConfig cfg,
 		cv::Mat & outputCovariance,
 		double * startError,
 		double * finalError,
@@ -305,12 +306,12 @@ std::map<int, Transform> optimize2d(
 				e.set_s22(S(2,2));
 				return e;
 			};
-			if(robustMode != 0 &&
+			if(closureLoss >= 0 &&
 				iter->second.type() != Link::kNeighbor &&
 				iter->second.type() != Link::kNeighborMerged)
 			{
 				ra::RobustEdge2 e = fill(graph.robust_edges().push());
-				e.set_loss(robustMode);
+				e.set_loss(closureLoss);
 				e.set_c2(robustC2);
 			}
 			else
@@ -356,10 +357,10 @@ std::map<int, Transform> optimize2d(
 					e.set_s22(S(2,2));
 					return e;
 				};
-				if(robustMode != 0)
+				if(closureLoss >= 0)
 				{
 					ra::RobustEdge2 e = fillLm(graph.robust_edges().push());
-					e.set_loss(robustMode);
+					e.set_loss(closureLoss);
 					e.set_c2(robustC2);
 				}
 				else
@@ -406,9 +407,19 @@ std::map<int, Transform> optimize2d(
 		p.set_rot_angle_optimize(false);
 	}
 
+	// marginal covariance of the newest pose, like the g2o/GTSAM back-ends,
+	// assembled by the solve; it does not exist when the newest pose is the
+	// fixed gauge anchor
+	const bool newestIsRoot = rootFixed && index.rbegin()->second == rootIter->second;
+	if(!newestIsRoot)
+	{
+		cfg.covariance = ra::CovMode::PerQuery;
+	}
+
+	// root id 0: no fixed root (priors anchor the graph)
 	UDEBUG("2d graph: %zu poses, %zu edges (%zu robust), root id=%d, initial lambda=%g, built in %f ms",
 		(size_t)graph.poses().size(), (size_t)graph.edges().size(),
-		(size_t)graph.robust_edges().size(), rootIter->first,
+		(size_t)graph.robust_edges().size(), rootIter != index.end() ? rootIter->first : 0,
 		cfg.initial_lambda, setupTimer.ticks() * 1000.0);
 	if(cfg.observer_user)
 	{
@@ -453,18 +464,14 @@ std::map<int, Transform> optimize2d(
 		}
 	}
 
-	// marginal covariance of the newest pose, like the g2o/GTSAM back-ends
-	if(rootFixed && index.rbegin()->second == rootIter->second)
+	if(newestIsRoot)
 	{
-		// the newest pose is the fixed gauge anchor; its marginal does not
-		// exist (the g2o back-end warns and keeps identity here too)
+		// the g2o back-end warns and keeps identity here too
 		UWARN("Newest pose %d is the fixed root. Cannot compute last pose covariance.",
 			index.rbegin()->first);
 		return optimizedPoses;
 	}
-	UDEBUG("Computing marginals for node %d...", index.rbegin()->first);
-	UTimer covTimer;
-	auto cov = graph.assemble_covariance(ra::CovMode::PerQuery);
+	auto cov = result->covariance();
 	if(cov.is_err())
 	{
 		if(rootFixed)
@@ -493,7 +500,7 @@ std::map<int, Transform> optimize2d(
 		optimizedPoses.clear();
 		return optimizedPoses;
 	}
-	UDEBUG("Computed marginals = %fs (key=%d)", covTimer.ticks(), index.rbegin()->first);
+	UDEBUG("Computed marginals = %fs (key=%d)", result->timing.covariance, index.rbegin()->first);
 	// (x, y, theta) into the (x, y, yaw) slots of the 6x6
 	outputCovariance.at<double>(0,0) = m->rows[0].x; // x-x
 	outputCovariance.at<double>(0,1) = m->rows[0].y; // x-y
@@ -515,9 +522,9 @@ std::map<int, Transform> optimize3d(
 		bool priorsIgnored,
 		bool landmarksIgnored,
 		float gravitySigma, // 0 = gravity links ignored
-		int robustMode, // 0=off, 1=Geman-McClure, 2=Cauchy (closures only)
+		int closureLoss, // -1=off, 0=Geman-McClure, 1=Cauchy (closures only)
 		double robustC2,
-		const rtabmap_arael::graph3::LmConfig & cfg,
+		rtabmap_arael::graph3::LmConfig cfg,
 		cv::Mat & outputCovariance,
 		double * startError,
 		double * finalError,
@@ -583,7 +590,7 @@ std::map<int, Transform> optimize3d(
 				ra::Pose3 p = graph.poses().push();
 				Eigen::Quaterniond q = iter->second.getQuaterniond();
 				p.set_pose_translation({iter->second.x(), iter->second.y(), iter->second.z()});
-				p.set_pose_rotation({q.w(), {q.x(), q.y(), q.z()}});
+				p.set_pose_rotation(ra::quaternd::from_eigen(q));
 				index.insert(std::make_pair(iter->first, i));
 			}
 			else
@@ -601,7 +608,7 @@ std::map<int, Transform> optimize3d(
 			ra::Pose3 p = graph.poses().push();
 			Eigen::Quaterniond q = iter->second.getQuaterniond();
 			p.set_pose_translation({iter->second.x(), iter->second.y(), iter->second.z()});
-			p.set_pose_rotation({q.w(), {q.x(), q.y(), q.z()}});
+			p.set_pose_rotation(ra::quaternd::from_eigen(q));
 			index.insert(std::make_pair(iter->first, i));
 
 			std::map<int, const Link *>::const_iterator git = gravityLinks.find(iter->first);
@@ -613,7 +620,7 @@ std::map<int, Transform> optimize3d(
 						.toRotationMatrix().transpose() * Eigen::Vector3d::UnitZ();
 				gb.normalize();
 				p.set_has_gravity(true);
-				p.set_gb({gb.x(), gb.y(), gb.z()});
+				p.set_gb(ra::vect3d::from_eigen(gb));
 				p.set_gw(1.0 / gravitySigma);
 			}
 
@@ -637,10 +644,7 @@ std::map<int, Transform> optimize3d(
 					}
 					const Eigen::Matrix3d S = info.llt().matrixU();
 					p.set_prior_mode(2);
-					p.set_pu_tt(ra::matrix3d::from_rows(
-						{S(0,0), S(0,1), S(0,2)},
-						{0.0,    S(1,1), S(1,2)},
-						{0.0,    0.0,    S(2,2)}));
+					p.set_pu_tt(ra::matrix3d::from_eigen(S));
 				}
 				else
 				{
@@ -650,24 +654,11 @@ std::map<int, Transform> optimize3d(
 						memcpy(info.data(), m.data, m.total()*sizeof(double));
 					}
 					const Eigen::Matrix<double, 6, 6> S = info.llt().matrixU();
-					Eigen::Matrix3d R = t.getQuaterniond().toRotationMatrix();
 					p.set_prior_mode(1);
-					p.set_pr_r(ra::matrix3d::from_rows(
-						{R(0,0), R(0,1), R(0,2)},
-						{R(1,0), R(1,1), R(1,2)},
-						{R(2,0), R(2,1), R(2,2)}));
-					p.set_pu_tt(ra::matrix3d::from_rows(
-						{S(0,0), S(0,1), S(0,2)},
-						{0.0,    S(1,1), S(1,2)},
-						{0.0,    0.0,    S(2,2)}));
-					p.set_pu_tr(ra::matrix3d::from_rows(
-						{S(0,3), S(0,4), S(0,5)},
-						{S(1,3), S(1,4), S(1,5)},
-						{S(2,3), S(2,4), S(2,5)}));
-					p.set_pu_rr(ra::matrix3d::from_rows(
-						{S(3,3), S(3,4), S(3,5)},
-						{0.0,    S(4,4), S(4,5)},
-						{0.0,    0.0,    S(5,5)}));
+					p.set_pr_r(ra::matrix3d::from_eigen(t.getQuaterniond().toRotationMatrix()));
+					p.set_pu_tt(ra::matrix3d::from_eigen(S.block<3,3>(0,0)));
+					p.set_pu_tr(ra::matrix3d::from_eigen(S.block<3,3>(0,3)));
+					p.set_pu_rr(ra::matrix3d::from_eigen(S.block<3,3>(3,3)));
 				}
 			}
 		}
@@ -690,36 +681,23 @@ std::map<int, Transform> optimize3d(
 			const Eigen::Matrix<double, 6, 6> S = information.llt().matrixU();
 
 			const Transform & t = iter->second.transform();
-			Eigen::Matrix3d R = t.getQuaterniond().toRotationMatrix();
 
 			auto fill = [&](auto e) {
 				e.set_a(graph.poses().ref_at(index.at(id1)));
 				e.set_b(graph.poses().ref_at(index.at(id2)));
 				e.set_dt({t.x(), t.y(), t.z()});
-				e.set_rmeas(ra::matrix3d::from_rows(
-					{R(0,0), R(0,1), R(0,2)},
-					{R(1,0), R(1,1), R(1,2)},
-					{R(2,0), R(2,1), R(2,2)}));
-				e.set_u_tt(ra::matrix3d::from_rows(
-					{S(0,0), S(0,1), S(0,2)},
-					{0.0,    S(1,1), S(1,2)},
-					{0.0,    0.0,    S(2,2)}));
-				e.set_u_tr(ra::matrix3d::from_rows(
-					{S(0,3), S(0,4), S(0,5)},
-					{S(1,3), S(1,4), S(1,5)},
-					{S(2,3), S(2,4), S(2,5)}));
-				e.set_u_rr(ra::matrix3d::from_rows(
-					{S(3,3), S(3,4), S(3,5)},
-					{0.0,    S(4,4), S(4,5)},
-					{0.0,    0.0,    S(5,5)}));
+				e.set_rmeas(ra::matrix3d::from_eigen(t.getQuaterniond().toRotationMatrix()));
+				e.set_u_tt(ra::matrix3d::from_eigen(S.block<3,3>(0,0)));
+				e.set_u_tr(ra::matrix3d::from_eigen(S.block<3,3>(0,3)));
+				e.set_u_rr(ra::matrix3d::from_eigen(S.block<3,3>(3,3)));
 				return e;
 			};
-			if(robustMode != 0 &&
+			if(closureLoss >= 0 &&
 				iter->second.type() != Link::kNeighbor &&
 				iter->second.type() != Link::kNeighborMerged)
 			{
 				ra::RobustEdge3 e = fill(graph.robust_edges().push());
-				e.set_loss(robustMode);
+				e.set_loss(closureLoss);
 				e.set_c2(robustC2);
 			}
 			else
@@ -748,33 +726,20 @@ std::map<int, Transform> optimize3d(
 					memcpy(information.data(), m.data, m.total()*sizeof(double));
 				}
 				const Eigen::Matrix<double, 6, 6> S = information.llt().matrixU();
-				Eigen::Matrix3d R = lt.getQuaterniond().toRotationMatrix();
 				auto fillLm = [&](auto e) {
 					e.set_a(graph.poses().ref_at(index.at(nodeId)));
 					e.set_b(graph.poses().ref_at(index.at(lmId)));
 					e.set_dt({lt.x(), lt.y(), lt.z()});
-					e.set_rmeas(ra::matrix3d::from_rows(
-						{R(0,0), R(0,1), R(0,2)},
-						{R(1,0), R(1,1), R(1,2)},
-						{R(2,0), R(2,1), R(2,2)}));
-					e.set_u_tt(ra::matrix3d::from_rows(
-						{S(0,0), S(0,1), S(0,2)},
-						{0.0,    S(1,1), S(1,2)},
-						{0.0,    0.0,    S(2,2)}));
-					e.set_u_tr(ra::matrix3d::from_rows(
-						{S(0,3), S(0,4), S(0,5)},
-						{S(1,3), S(1,4), S(1,5)},
-						{S(2,3), S(2,4), S(2,5)}));
-					e.set_u_rr(ra::matrix3d::from_rows(
-						{S(3,3), S(3,4), S(3,5)},
-						{0.0,    S(4,4), S(4,5)},
-						{0.0,    0.0,    S(5,5)}));
+					e.set_rmeas(ra::matrix3d::from_eigen(lt.getQuaterniond().toRotationMatrix()));
+					e.set_u_tt(ra::matrix3d::from_eigen(S.block<3,3>(0,0)));
+					e.set_u_tr(ra::matrix3d::from_eigen(S.block<3,3>(0,3)));
+					e.set_u_rr(ra::matrix3d::from_eigen(S.block<3,3>(3,3)));
 					return e;
 				};
-				if(robustMode != 0)
+				if(closureLoss >= 0)
 				{
 					ra::RobustEdge3 e = fillLm(graph.robust_edges().push());
-					e.set_loss(robustMode);
+					e.set_loss(closureLoss);
 					e.set_c2(robustC2);
 				}
 				else
@@ -797,10 +762,7 @@ std::map<int, Transform> optimize3d(
 				o.set_a(graph.poses().ref_at(index.at(nodeId)));
 				o.set_lm(graph.lm_points().ref_at(lmIndex.at(lmId)));
 				o.set_m({lt.x(), lt.y(), lt.z()});
-				o.set_s(ra::matrix3d::from_rows(
-					{S(0,0), S(0,1), S(0,2)},
-					{0.0,    S(1,1), S(1,2)},
-					{0.0,    0.0,    S(2,2)}));
+				o.set_s(ra::matrix3d::from_eigen(S));
 			}
 		}
 		//else // priors and gravity handled above
@@ -827,12 +789,9 @@ std::map<int, Transform> optimize3d(
 		}
 		else
 		{
-			Eigen::Matrix3d R = poses.at(rootIter->first).getQuaterniond().toRotationMatrix();
 			p.set_has_anchor(true);
-			p.set_an_r(ra::matrix3d::from_rows(
-				{R(0,0), R(0,1), R(0,2)},
-				{R(1,0), R(1,1), R(1,2)},
-				{R(2,0), R(2,1), R(2,2)}));
+			p.set_an_r(ra::matrix3d::from_eigen(
+				poses.at(rootIter->first).getQuaterniond().toRotationMatrix()));
 			// the GTSAM back-end's gravity-mode root weights: roll/pitch
 			// variance 2, yaw 1e-9
 			p.set_an_wrp(1.0 / std::sqrt(2.0));
@@ -840,9 +799,19 @@ std::map<int, Transform> optimize3d(
 		}
 	}
 
+	// marginal covariance of the newest pose, like the g2o/GTSAM back-ends,
+	// assembled by the solve; it does not exist when the newest pose is the
+	// fixed gauge anchor
+	const bool newestIsRoot = rootFixed && index.rbegin()->second == rootIter->second;
+	if(!newestIsRoot)
+	{
+		cfg.covariance = ra::CovMode::PerQuery;
+	}
+
+	// root id 0: no fixed root (priors anchor the graph)
 	UDEBUG("3d graph: %zu poses, %zu edges (%zu robust), root id=%d, initial lambda=%g, built in %f ms",
 		(size_t)graph.poses().size(), (size_t)graph.edges().size(),
-		(size_t)graph.robust_edges().size(), rootIter->first,
+		(size_t)graph.robust_edges().size(), rootIter != index.end() ? rootIter->first : 0,
 		cfg.initial_lambda, setupTimer.ticks() * 1000.0);
 	if(cfg.observer_user)
 	{
@@ -885,18 +854,14 @@ std::map<int, Transform> optimize3d(
 		}
 	}
 
-	// marginal covariance of the newest pose, like the g2o/GTSAM back-ends
-	if(rootFixed && index.rbegin()->second == rootIter->second)
+	if(newestIsRoot)
 	{
-		// the newest pose is the fixed gauge anchor; its marginal does not
-		// exist (the g2o back-end warns and keeps identity here too)
+		// the g2o back-end warns and keeps identity here too
 		UWARN("Newest pose %d is the fixed root. Cannot compute last pose covariance.",
 			index.rbegin()->first);
 		return optimizedPoses;
 	}
-	UDEBUG("Computing marginals for node %d...", index.rbegin()->first);
-	UTimer covTimer;
-	auto cov = graph.assemble_covariance(ra::CovMode::PerQuery);
+	auto cov = result->covariance();
 	double m[36];
 	if(cov.is_err() ||
 		cov->marginal(graph.poses()[index.rbegin()->second], m, 36) != 6)
@@ -921,7 +886,7 @@ std::map<int, Transform> optimize3d(
 		}
 		return optimizedPoses;
 	}
-	UDEBUG("Computed marginals = %fs (key=%d)", covTimer.ticks(), index.rbegin()->first);
+	UDEBUG("Computed marginals = %fs (key=%d)", result->timing.covariance, index.rbegin()->first);
 	// TransformParam's marginal is rotation-first ([w; d], the body-frame
 	// twist); rtabmap wants translation first, like the GTSAM back-end's
 	// permutation of gtsam's rotation-first tangent
@@ -959,11 +924,11 @@ std::map<int, Transform> OptimizerArael::optimize(
 		double initialError = 0.0;
 		double error = 0.0;
 		int iterationsCount = 0;
-		int robustMode = 0;
+		int closureLoss = -1;
 		double robustC2Value = 0.0;
 		if(isRobust())
 		{
-			robustMode = robustLoss() == 1 ? 2 : 1;
+			closureLoss = robustLoss();
 			robustC2Value = robustC2() > 0.0 ? robustC2()
 					: (robustLoss() == 1 ? 1.5 : 2.99);
 			UDEBUG("robust: %s loss on loop closures, c2=%f",
@@ -983,7 +948,7 @@ std::map<int, Transform> OptimizerArael::optimize(
 			{
 				cfg.initial_lambda = initialLambda();
 			}
-			else if(robustMode != 0)
+			else if(closureLoss >= 0)
 			{
 				// robust losses flatten the cost surface around outliers;
 				// near-Gauss-Newton first steps overshoot into poor local
@@ -997,7 +962,7 @@ std::map<int, Transform> OptimizerArael::optimize(
 			}
 			optimizedPoses = optimize2d(rootId, poses, edgeConstraints,
 				isCovarianceIgnored(), priorsIgnored(), landmarksIgnored(),
-				robustMode, robustC2Value, cfg, outputCovariance,
+				closureLoss, robustC2Value, cfg, outputCovariance,
 				&initialError, &error, &iterationsCount);
 		}
 		else
@@ -1009,7 +974,7 @@ std::map<int, Transform> OptimizerArael::optimize(
 			{
 				cfg.initial_lambda = initialLambda();
 			}
-			else if(robustMode != 0)
+			else if(closureLoss >= 0)
 			{
 				// robust losses flatten the cost surface around outliers;
 				// near-Gauss-Newton first steps overshoot into poor local
@@ -1023,7 +988,7 @@ std::map<int, Transform> OptimizerArael::optimize(
 			}
 			optimizedPoses = optimize3d(rootId, poses, edgeConstraints,
 				isCovarianceIgnored(), priorsIgnored(), landmarksIgnored(),
-				gravitySigma(), robustMode, robustC2Value, cfg,
+				gravitySigma(), closureLoss, robustC2Value, cfg,
 				outputCovariance, &initialError, &error, &iterationsCount);
 		}
 		if(finalError)
@@ -1088,7 +1053,7 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 			uint32_t idx = graph.cams().size();
 			ra::BaCam cam = graph.cams().push();
 			cam.set_pose_translation({t.x(), t.y(), t.z()});
-			cam.set_pose_rotation({q.w(), {q.x(), q.y(), q.z()}});
+			cam.set_pose_rotation(ra::quaternd::from_eigen(q));
 			camIdxByKey.insert(std::make_pair(std::make_pair(iter->first, (int)c), idx));
 		}
 	}
@@ -1119,13 +1084,11 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 	const double invSigmaD  = 1.0 / std::sqrt(disparityVariance_);
 	// Optimizer/RobustKernelDelta is only the robustness switch here (0 =
 	// plain quadratic BA); the loss and its scale come from
-	// Arael/BaRobustLoss and Arael/BaRobustC2. A huge scale keeps the
-	// Huber loss in its quadratic branch = no kernel. Model loss tags:
-	// 0=Huber, 1=Geman-McClure, 2=Cauchy.
+	// Arael/BaRobustLoss and Arael/BaRobustC2. The model's loss tags are
+	// Arael/BaRobustLoss's, plus 3 = no kernel.
 	const bool robust = robustKernelDelta_ > 0.0;
-	const double obsK2 = robust ? baRobustC2_ : 1e30;
-	const uint32_t obsLoss = !robust ? 0u :
-			(baRobustLoss_ == 0 ? 1u : baRobustLoss_ == 1 ? 2u : 0u);
+	const double obsK2 = baRobustC2_;
+	const uint32_t obsLoss = robust ? (uint32_t)baRobustLoss_ : 3u;
 	int monoObsCount = 0, stereoObsCount = 0;
 	for(std::map<int, std::map<int, FeatureBA> >::const_iterator iter=wordReferences.begin();
 		iter!=wordReferences.end(); ++iter)
@@ -1207,27 +1170,15 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 	// multi-camera setups; both use the BaLink constraint
 	auto addLink = [&](uint32_t idxA, uint32_t idxB, const Transform & camLink,
 			const Eigen::Matrix<double, 6, 6> & S) {
-		Eigen::Matrix3d Rm = camLink.getQuaterniond().toRotationMatrix();
 		ra::BaLink e = graph.links().push();
 		e.set_a(graph.cams().ref_at(idxA));
 		e.set_b(graph.cams().ref_at(idxB));
 		e.set_dt({camLink.x(), camLink.y(), camLink.z()});
-		e.set_rmeas_t(ra::matrix3d::from_rows(
-			{Rm(0,0), Rm(1,0), Rm(2,0)},
-			{Rm(0,1), Rm(1,1), Rm(2,1)},
-			{Rm(0,2), Rm(1,2), Rm(2,2)}));
-		e.set_u_tt(ra::matrix3d::from_rows(
-			{S(0,0), S(0,1), S(0,2)},
-			{0.0,    S(1,1), S(1,2)},
-			{0.0,    0.0,    S(2,2)}));
-		e.set_u_tr(ra::matrix3d::from_rows(
-			{S(0,3), S(0,4), S(0,5)},
-			{S(1,3), S(1,4), S(1,5)},
-			{S(2,3), S(2,4), S(2,5)}));
-		e.set_u_rr(ra::matrix3d::from_rows(
-			{S(3,3), S(3,4), S(3,5)},
-			{0.0,    S(4,4), S(4,5)},
-			{0.0,    0.0,    S(5,5)}));
+		e.set_rmeas_t(ra::matrix3d::from_eigen(
+			camLink.getQuaterniond().toRotationMatrix().transpose()));
+		e.set_u_tt(ra::matrix3d::from_eigen(S.block<3,3>(0,0)));
+		e.set_u_tr(ra::matrix3d::from_eigen(S.block<3,3>(0,3)));
+		e.set_u_rr(ra::matrix3d::from_eigen(S.block<3,3>(3,3)));
 	};
 	int linkObsCount = 0;
 	for(std::multimap<int, Link>::const_iterator iter=links.begin(); iter!=links.end(); ++iter)
@@ -1346,7 +1297,7 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 			const Eigen::Vector3d d = -(Rbc.transpose() * tbc);
 			ra::BaCam cam = graph.cams()[camIt->second];
 			cam.set_has_planar(true);
-			cam.set_pl_d({d.x(), d.y(), d.z()});
+			cam.set_pl_d(ra::vect3d::from_eigen(d));
 			cam.set_pl_z(iter->second.z());
 			cam.set_pl_w(std::sqrt(1e9));
 		}
@@ -1405,10 +1356,8 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 		for(uint32_t i = 0; i < graph.cams().size(); ++i)
 		{
 			ra::BaCam cam = graph.cams()[i];
-			ra::quaternd q = cam.pose_rotation();
-			camR[i] = Eigen::Quaterniond(q.t, q.v.x, q.v.y, q.v.z).toRotationMatrix();
-			ra::vect3d t = cam.pose_translation();
-			camT[i] = Eigen::Vector3d(t.x, t.y, t.z);
+			camR[i] = cam.pose_rotation().to_eigen().toRotationMatrix();
+			camT[i] = cam.pose_translation().to_eigen();
 		}
 		const double flagChi2 = prune ? baPruneChi2_ : baRobustC2_;
 		std::map<int, int> observationsPerWord;

@@ -1,4 +1,5 @@
-# cargo arael export also emits python bindings and sidecar metadata;
-# only capi/ and cxx/ are used by the backend
+# cargo arael export also emits python and wasm bindings and sidecar
+# metadata; only capi/ and cxx/ are used by the backend
 /python/
+/wasm/
 /target/
