@@ -25,6 +25,7 @@
  */
 
 #include <rtabmap/core/DBDriver.h>
+#include <rtabmap/core/Graph.h>
 #include <rtabmap/core/Optimizer.h>
 #include <rtabmap/core/Link.h>
 #include <rtabmap/core/Transform.h>
@@ -58,7 +59,12 @@ using namespace rtabmap;
 static void showUsage()
 {
 	printf("\nUsage:\n"
-		"   rtabmap-optimizerBenchmark [options] \"input.db\"\n\n"
+		"   rtabmap-optimizerBenchmark [options] \"input.db\"\n"
+		"   rtabmap-optimizerBenchmark [options] \"input.g2o\"\n\n"
+		"  A .g2o pose graph (as saved by rtabmap, link types in the last\n"
+		"  column) is read with graph::importPoses; its vertex poses are not\n"
+		"  used, the initial guess is composed from the links as for a database.\n"
+		"  Bundle adjustment (--ba) needs a database.\n\n"
 		"  Options:\n"
 		"     --reps #        Repetitions per backend, interleaved (default 5); the median is reported.\n"
 		"     --iterations #  Maximum solver iterations (default 100).\n"
@@ -1148,16 +1154,34 @@ int main(int argc, char * argv[])
 		return 1;
 	}
 
-	DBDriver * driver = DBDriver::create();
-	if(!driver->openConnection(dbPath))
-	{
-		printf("Cannot open database \"%s\"\n", dbPath.c_str());
-		return 1;
-	}
 	std::multimap<int, Link> allLinks;
-	driver->getAllLinks(allLinks, true, false);
-	driver->closeConnection();
-	delete driver;
+	const bool g2oInput = dbPath.size() > 4 && dbPath.compare(dbPath.size() - 4, 4, ".g2o") == 0;
+	if(g2oInput)
+	{
+		if(ba)
+		{
+			printf("Bundle adjustment (--ba) needs a database, not a .g2o graph.\n");
+			return 1;
+		}
+		std::map<int, Transform> filePoses;
+		if(!graph::importPoses(dbPath, 4, filePoses, &allLinks))
+		{
+			printf("Cannot read g2o graph \"%s\"\n", dbPath.c_str());
+			return 1;
+		}
+	}
+	else
+	{
+		DBDriver * driver = DBDriver::create();
+		if(!driver->openConnection(dbPath))
+		{
+			printf("Cannot open database \"%s\"\n", dbPath.c_str());
+			return 1;
+		}
+		driver->getAllLinks(allLinks, true, false);
+		driver->closeConnection();
+		delete driver;
+	}
 
 	// pose-pose links only, one per pair: the database stores each link in
 	// both directions, and a doubled set would double every cost and the
@@ -1176,7 +1200,7 @@ int main(int argc, char * argv[])
 	}
 	if(links.empty())
 	{
-		printf("Database has no pose-pose links.\n");
+		printf("The graph has no pose-pose links.\n");
 		return 1;
 	}
 
