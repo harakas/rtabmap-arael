@@ -3,7 +3,9 @@ resolver = "2"
 members = [".", "capi"]
 
 [workspace.dependencies]
-arael = "0.9.0"
+# threads: lets Arael/Threads (or ARAEL_NUM_THREADS) run solves on
+# several threads
+arael = { version = "0.9.0", features = ["threads"] }
 
 [profile.release]
 codegen-units = 1

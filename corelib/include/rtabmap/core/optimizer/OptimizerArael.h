@@ -44,6 +44,8 @@ public:
 		Optimizer(iterations, slam2d, covarianceIgnored, epsilon),
 		preset_(Parameters::defaultAraelPreset()),
 		initialLambda_(Parameters::defaultAraelInitialLambda()),
+		threads_(Parameters::defaultAraelThreads()),
+		poseGraphSingleThread_(Parameters::defaultAraelPoseGraphSingleThread()),
 		robustLoss_(Parameters::defaultAraelRobustLoss()),
 		robustC2_(Parameters::defaultAraelRobustC2()),
 		baSolve_(Parameters::defaultAraelBaSolve()),
@@ -58,6 +60,8 @@ public:
 		Optimizer(parameters),
 		preset_(Parameters::defaultAraelPreset()),
 		initialLambda_(Parameters::defaultAraelInitialLambda()),
+		threads_(Parameters::defaultAraelThreads()),
+		poseGraphSingleThread_(Parameters::defaultAraelPoseGraphSingleThread()),
 		robustLoss_(Parameters::defaultAraelRobustLoss()),
 		robustC2_(Parameters::defaultAraelRobustC2()),
 		baSolve_(Parameters::defaultAraelBaSolve()),
@@ -83,6 +87,14 @@ public:
 	/** @brief Initial LM damping override; 0 means the preset's value
 	 *  (see Arael/InitialLambda). */
 	double initialLambda() const {return initialLambda_;}
+
+	/** @brief Solve threads: -1 = arael's default (ARAEL_NUM_THREADS,
+	 *  else 1), 0 = every core, n = n (see Arael/Threads). */
+	int threads() const {return threads_;}
+
+	/** @brief Whether graph optimization runs on one thread whatever
+	 *  threads() says (see Arael/PoseGraphSingleThread). */
+	bool poseGraphSingleThread() const {return poseGraphSingleThread_;}
 
 	/** @brief Robust loss for loop closures when isRobust():
 	 *  0=Geman-McClure, 1=Cauchy (see Arael/RobustLoss). */
@@ -130,6 +142,8 @@ public:
 private:
 	int preset_;
 	double initialLambda_;
+	int threads_;
+	bool poseGraphSingleThread_;
 	int robustLoss_;
 	double robustC2_;
 	int baSolve_;

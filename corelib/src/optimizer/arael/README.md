@@ -28,6 +28,8 @@ cargo arael export
 | `Optimizer/Strategy` | | `5` selects this backend |
 | `Arael/Preset` | 2 | damping preset: 1=conservative, 2=well conditioned, 3=ill conditioned |
 | `Arael/InitialLambda` | 0 | initial damping; 0 = the preset's value |
+| `Arael/Threads` | -1 | solve threads: -1 = arael's default (`ARAEL_NUM_THREADS`, else 1), 0 = every core, n = n threads |
+| `Arael/PoseGraphSingleThread` | true | graph optimization runs on one thread whatever `Arael/Threads` says; bundle adjustment follows `Arael/Threads` |
 | `Optimizer/Robust` | false | robust loss on loop-closure links (see below) |
 | `Arael/RobustLoss` | 0 | that loss: 0=Geman-McClure, 1=Cauchy |
 | `Arael/RobustC2` | 0 | its squared scale; 0 = the loss default (2.99 Geman-McClure, 1.5 Cauchy) |

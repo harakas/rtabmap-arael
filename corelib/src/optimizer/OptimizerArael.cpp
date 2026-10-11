@@ -48,6 +48,14 @@ void OptimizerArael::parseParameters(const ParametersMap & parameters)
 			Parameters::kAraelInitialLambda().c_str(), initialLambda_);
 		initialLambda_ = 0.0;
 	}
+	Parameters::parse(parameters, Parameters::kAraelThreads(), threads_);
+	if(threads_ < -1)
+	{
+		UWARN("%s=%d is invalid (-1=arael's default, 0=every core, n=n threads), using -1.",
+			Parameters::kAraelThreads().c_str(), threads_);
+		threads_ = -1;
+	}
+	Parameters::parse(parameters, Parameters::kAraelPoseGraphSingleThread(), poseGraphSingleThread_);
 	Parameters::parse(parameters, Parameters::kAraelRobustLoss(), robustLoss_);
 	if(robustLoss_ < 0 || robustLoss_ > 1)
 	{
@@ -416,11 +424,11 @@ std::map<int, Transform> optimize2d(
 		cfg.covariance = ra::CovMode::PerQuery;
 	}
 
-	// root id 0: no fixed root (priors anchor the graph)
-	UDEBUG("2d graph: %zu poses, %zu edges (%zu robust), root id=%d, initial lambda=%g, built in %f ms",
+	// root id 0: no fixed root (priors anchor the graph); threads=0: every core
+	UDEBUG("2d graph: %zu poses, %zu edges (%zu robust), root id=%d, initial lambda=%g, threads=%u, built in %f ms",
 		(size_t)graph.poses().size(), (size_t)graph.edges().size(),
 		(size_t)graph.robust_edges().size(), rootIter != index.end() ? rootIter->first : 0,
-		cfg.initial_lambda, setupTimer.ticks() * 1000.0);
+		cfg.initial_lambda, cfg.num_threads, setupTimer.ticks() * 1000.0);
 	if(cfg.observer_user)
 	{
 		// the observer times attempt-to-attempt; align its clock with the
@@ -808,11 +816,11 @@ std::map<int, Transform> optimize3d(
 		cfg.covariance = ra::CovMode::PerQuery;
 	}
 
-	// root id 0: no fixed root (priors anchor the graph)
-	UDEBUG("3d graph: %zu poses, %zu edges (%zu robust), root id=%d, initial lambda=%g, built in %f ms",
+	// root id 0: no fixed root (priors anchor the graph); threads=0: every core
+	UDEBUG("3d graph: %zu poses, %zu edges (%zu robust), root id=%d, initial lambda=%g, threads=%u, built in %f ms",
 		(size_t)graph.poses().size(), (size_t)graph.edges().size(),
 		(size_t)graph.robust_edges().size(), rootIter != index.end() ? rootIter->first : 0,
-		cfg.initial_lambda, setupTimer.ticks() * 1000.0);
+		cfg.initial_lambda, cfg.num_threads, setupTimer.ticks() * 1000.0);
 	if(cfg.observer_user)
 	{
 		// the observer times attempt-to-attempt; align its clock with the
@@ -944,6 +952,14 @@ std::map<int, Transform> OptimizerArael::optimize(
 			rtabmap_arael::graph2::LmConfig cfg((arael::LmPreset)preset());
 			cfg.max_iters = iterations();
 			cfg.rel_precision = this->epsilon();
+			if(poseGraphSingleThread())
+			{
+				cfg.num_threads = 1;
+			}
+			else if(threads() >= 0)
+			{
+				cfg.num_threads = threads();
+			}
 			if(initialLambda() > 0.0)
 			{
 				cfg.initial_lambda = initialLambda();
@@ -970,6 +986,14 @@ std::map<int, Transform> OptimizerArael::optimize(
 			rtabmap_arael::graph3::LmConfig cfg((arael::LmPreset)preset());
 			cfg.max_iters = iterations();
 			cfg.rel_precision = this->epsilon();
+			if(poseGraphSingleThread())
+			{
+				cfg.num_threads = 1;
+			}
+			else if(threads() >= 0)
+			{
+				cfg.num_threads = threads();
+			}
 			if(initialLambda() > 0.0)
 			{
 				cfg.initial_lambda = initialLambda();
@@ -1316,6 +1340,11 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 	// additionally prunes them and re-solves (converge-prune-refine)
 	const bool prune = robust && baPruneChi2_ > 0.0 && !obsMeta.empty();
 	cfg.max_iters = iterations();
+	if(threads() >= 0)
+	{
+		cfg.num_threads = threads();
+	}
+	UDEBUG("arael BA: threads=%u (0 = every core)", cfg.num_threads);
 
 	// Arael/BaSolve=1: the reduced camera system by preconditioned
 	// conjugate gradients instead of a factorization

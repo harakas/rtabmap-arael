@@ -500,6 +500,8 @@ class RTABMAP_CORE_EXPORT Parameters
     // arael parameters
     RTABMAP_PARAM(Arael, Preset,          int, 2,          "arael damping and termination preset: 1=conservative, 2=well conditioned, 3=ill conditioned.");
     RTABMAP_PARAM(Arael, InitialLambda,   double, 0.0,     uFormat("Initial Levenberg-Marquardt damping. 0 means use the preset's value (see %s).", kAraelPreset().c_str()));
+    RTABMAP_PARAM(Arael, Threads,         int, -1,         uFormat("Threads of an arael solve: -1 = arael's default (the ARAEL_NUM_THREADS environment variable, else 1), 0 = every core, n = n threads. Applies to bundle adjustment, and to graph optimization when %s is false. Threads have overhead; whether they help depends on the problem size.", kAraelPoseGraphSingleThread().c_str()));
+    RTABMAP_PARAM(Arael, PoseGraphSingleThread, bool, true,    uFormat("Run graph optimization on one thread, whatever %s or ARAEL_NUM_THREADS ask for. Bundle adjustment is not affected.", kAraelThreads().c_str()));
     RTABMAP_PARAM(Arael, RobustLoss,      int, 0,          uFormat("Robust loss applied to loop-closure links when %s is enabled: 0=Geman-McClure, 1=Cauchy.", kOptimizerRobust().c_str()));
     RTABMAP_PARAM(Arael, RobustC2,        double, 0.0,     uFormat("Squared scale of the robust loss, acting on the squared norm of the sqrt-information-weighted residual. 0 means the loss-specific default (2.99 for Geman-McClure, 1.5 for Cauchy). See %s.", kAraelRobustLoss().c_str()));
     RTABMAP_PARAM(Arael, BaSolve,         int, 0,          "Linear solver of the arael bundle adjustment: 0=auto (Schur reduction when it pays, direct Cholesky), 1=conjugate gradients on the reduced camera system (like Ceres' ITERATIVE_SCHUR).");

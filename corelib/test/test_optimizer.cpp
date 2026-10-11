@@ -3807,6 +3807,123 @@ TEST(AraelPresetTest, AllPresetsReachSameOptimum)
 }
 
 // ---------------------------------------------------------------------------
+// Arael/Threads: parameter plumbing, and threaded solves agreeing with the
+// single-threaded ones to rounding (pose graph 2D and 3D, robust mode,
+// bundle adjustment direct and conjugate gradients).
+// ---------------------------------------------------------------------------
+
+TEST(AraelThreadsTest, ParameterPlumbing)
+{
+	{
+		std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeArael));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).threads(), -1);
+		EXPECT_EQ(Parameters::defaultAraelThreads(), -1);
+	}
+	for(int n : {0, 1, 4})
+	{
+		ParametersMap params;
+		params[Parameters::kAraelThreads()] = uNumber2Str(n);
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).threads(), n);
+	}
+	{
+		// below -1 falls back to -1 (arael's default)
+		ParametersMap params;
+		params[Parameters::kAraelThreads()] = "-3";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_EQ(dynamic_cast<OptimizerArael &>(*opt).threads(), -1);
+	}
+	{
+		// graph optimization is single-threaded unless the flag is cleared
+		std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeArael));
+		EXPECT_TRUE(dynamic_cast<OptimizerArael &>(*opt).poseGraphSingleThread());
+		ParametersMap params;
+		params[Parameters::kAraelPoseGraphSingleThread()] = "false";
+		std::unique_ptr<Optimizer> opt2(
+				Optimizer::create(Optimizer::kTypeArael, params));
+		EXPECT_FALSE(dynamic_cast<OptimizerArael &>(*opt2).poseGraphSingleThread());
+	}
+}
+
+namespace {
+
+void expectSamePoses(const std::map<int, Transform> & a,
+		const std::map<int, Transform> & b, const std::string & what)
+{
+	ASSERT_EQ(a.size(), b.size()) << what;
+	for(const auto & kv : a)
+	{
+		ASSERT_TRUE(b.count(kv.first)) << what << " pose " << kv.first;
+		EXPECT_LT(kv.second.getDistance(b.at(kv.first)), 1e-4f) << what << " pose " << kv.first;
+		EXPECT_LT(kv.second.getAngle(b.at(kv.first)), 1e-4f) << what << " pose " << kv.first;
+	}
+}
+
+} // namespace
+
+TEST(AraelThreadsTest, ThreadedPoseGraphMatchesSingleThreaded)
+{
+	for(int mode = 0; mode < 3; ++mode)
+	{
+		const bool slam2d = mode == 0;
+		const bool robust = mode == 2;
+		const std::string what = slam2d ? "2d" : (robust ? "3d robust" : "3d");
+		CircleGraph g = buildCircleGraph(/*noisy=*/true, 1, slam2d);
+		std::map<int, Transform> out[2];
+		double err[2] = {0, 0};
+		const int threads[2] = {1, 4};
+		for(int i = 0; i < 2; ++i)
+		{
+			ParametersMap params;
+			params[Parameters::kAraelThreads()]              = uNumber2Str(threads[i]);
+			params[Parameters::kAraelPoseGraphSingleThread()] = "false";
+			params[Parameters::kRegForce3DoF()]              = slam2d ? "true" : "false";
+			params[Parameters::kOptimizerRobust()]           = robust ? "true" : "false";
+			params[Parameters::kOptimizerGravitySigma()]     = "0";
+			params[Parameters::kOptimizerPriorsIgnored()]    = "true";
+			params[Parameters::kOptimizerLandmarksIgnored()] = "true";
+			params[Parameters::kOptimizerIterations()]       = "100";
+			std::unique_ptr<Optimizer> opt(
+					Optimizer::create(Optimizer::kTypeArael, params));
+			cv::Mat cov;
+			out[i] = opt->optimize(1, g.poses, g.links, cov, 0, &err[i]);
+			ASSERT_FALSE(out[i].empty()) << what << " threads " << threads[i];
+		}
+		EXPECT_NEAR(err[1], err[0], 1e-6 * err[0]) << what;
+		expectSamePoses(out[0], out[1], what);
+	}
+}
+
+TEST(AraelThreadsTest, ThreadedBundleAdjustmentMatchesSingleThreaded)
+{
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+	for(int baSolve = 0; baSolve <= 1; ++baSolve)
+	{
+		const std::string what = baSolve == 0 ? "BA direct" : "BA conjugate gradients";
+		std::map<int, Transform> out[2];
+		const int threads[2] = {1, 4};
+		for(int i = 0; i < 2; ++i)
+		{
+			ParametersMap params;
+			params[Parameters::kOptimizerStrategy()] =
+					uNumber2Str(static_cast<int>(Optimizer::kTypeArael));
+			params[Parameters::kAraelThreads()]        = uNumber2Str(threads[i]);
+			params[Parameters::kAraelBaSolve()]        = uNumber2Str(baSolve);
+			params[Parameters::kOptimizerIterations()] = "200";
+			params[Parameters::kOptimizerBaseline()]   = "0.15";
+			std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+			std::map<int, cv::Point3f> points = g.initialPoints3D;
+			out[i] = opt->optimizeBA(
+					/*rootId=*/1, g.initialPoses, g.links, g.models, points, g.wordReferences);
+			ASSERT_FALSE(out[i].empty()) << what << " threads " << threads[i];
+		}
+		expectSamePoses(out[0], out[1], what);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // AraelRobustTest -- parameter plumbing for the robust loss, and the Cauchy
 // variant of the corrupted-loop-closure recovery (the Geman-McClure default
 // runs in CircleGraphBadLoopClosureTest/Arael_Robust).
