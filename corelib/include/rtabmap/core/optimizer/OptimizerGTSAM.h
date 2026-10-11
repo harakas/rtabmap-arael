@@ -49,6 +49,10 @@ public:
 
 	virtual void parseParameters(const ParametersMap & parameters);
 
+	/** @brief Solve threads: 0 = TBB's default, n = at most n
+	 *  (see GTSAM/Threads). */
+	int threads() const {return threads_;}
+
 	virtual std::map<int, Transform> optimize(
 			int rootId,
 			const std::map<int, Transform> & poses,
@@ -68,7 +72,27 @@ public:
 			BAOutliers * outliers = 0);
 
 private:
+	// optimize() and optimizeBA() run these, inside a TBB arena of
+	// threads_ threads when GTSAM/Threads is set
+	std::map<int, Transform> optimizeImpl(
+			int rootId,
+			const std::map<int, Transform> & poses,
+			const std::multimap<int, Link> & edgeConstraints,
+			cv::Mat & outputCovariance,
+			std::list<std::map<int, Transform> > * intermediateGraphes,
+			double * finalError,
+			int * iterationsDone);
+	std::map<int, Transform> optimizeBAImpl(
+			int rootId,
+			const std::map<int, Transform> & poses,
+			const std::multimap<int, Link> & links,
+			const std::map<int, std::vector<CameraModel> > & models,
+			std::map<int, cv::Point3f> & points3DMap,
+			const std::map<int, std::map<int, FeatureBA> > & wordReferences,
+			BAOutliers * outliers);
+
 	int internalOptimizerType_;
+	int threads_;
 	double pixelVariance_;
 	double disparityVariance_;
 	double robustKernelDelta_;

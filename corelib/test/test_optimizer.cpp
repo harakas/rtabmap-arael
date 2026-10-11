@@ -3476,11 +3476,10 @@ TEST_F(AraelBaOutlierReportTest, KeepsWithinBaRobustC2)
 // float poses while finalError is computed at the solver's internal doubles
 // (~1e-7 relative slack; see kParityRelTol).
 
-#ifdef RTABMAP_CERES
-
 namespace {
 
-void expectSamePoses(const std::map<int, Transform> & a,
+// Two solves' poses agree to rounding (threaded against single-threaded).
+[[maybe_unused]] void expectSamePoses(const std::map<int, Transform> & a,
 		const std::map<int, Transform> & b, const std::string & what)
 {
 	ASSERT_EQ(a.size(), b.size()) << what;
@@ -3494,6 +3493,7 @@ void expectSamePoses(const std::map<int, Transform> & a,
 
 } // namespace
 
+#ifdef RTABMAP_CERES
 #ifdef RTABMAP_ARAEL
 
 #include <Eigen/Cholesky>
@@ -4452,3 +4452,87 @@ TEST(CeresThreadsTest, ThreadedBundleAdjustmentMatchesSingleThreaded)
 }
 
 #endif  // RTABMAP_CERES
+
+#ifdef RTABMAP_GTSAM
+
+// ---------------------------------------------------------------------------
+// GTSAM/Threads: parameter plumbing, and solves capped to a TBB arena
+// agreeing with single-threaded ones to rounding.
+// ---------------------------------------------------------------------------
+
+#include <rtabmap/core/optimizer/OptimizerGTSAM.h>
+
+TEST(GtsamThreadsTest, ParameterPlumbing)
+{
+	{
+		std::unique_ptr<Optimizer> opt(Optimizer::create(Optimizer::kTypeGTSAM));
+		EXPECT_EQ(dynamic_cast<OptimizerGTSAM &>(*opt).threads(), 0);
+	}
+	{
+		ParametersMap params;
+		params[Parameters::kGTSAMThreads()] = "2";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeGTSAM, params));
+		EXPECT_EQ(dynamic_cast<OptimizerGTSAM &>(*opt).threads(), 2);
+	}
+	{
+		// negative falls back to 0 (TBB's default)
+		ParametersMap params;
+		params[Parameters::kGTSAMThreads()] = "-1";
+		std::unique_ptr<Optimizer> opt(
+				Optimizer::create(Optimizer::kTypeGTSAM, params));
+		EXPECT_EQ(dynamic_cast<OptimizerGTSAM &>(*opt).threads(), 0);
+	}
+}
+
+TEST(GtsamThreadsTest, ThreadedPoseGraphMatchesSingleThreaded)
+{
+	for(int mode = 0; mode < 2; ++mode)
+	{
+		const bool slam2d = mode == 0;
+		const std::string what = slam2d ? "2d" : "3d";
+		CircleGraph g = buildCircleGraph(/*noisy=*/true, 1, slam2d);
+		std::map<int, Transform> out[2];
+		const int threads[2] = {1, 4};
+		for(int i = 0; i < 2; ++i)
+		{
+			ParametersMap params;
+			params[Parameters::kGTSAMThreads()]              = uNumber2Str(threads[i]);
+			params[Parameters::kRegForce3DoF()]              = slam2d ? "true" : "false";
+			params[Parameters::kOptimizerGravitySigma()]     = "0";
+			params[Parameters::kOptimizerPriorsIgnored()]    = "true";
+			params[Parameters::kOptimizerLandmarksIgnored()] = "true";
+			params[Parameters::kOptimizerIterations()]       = "100";
+			std::unique_ptr<Optimizer> opt(
+					Optimizer::create(Optimizer::kTypeGTSAM, params));
+			cv::Mat cov;
+			out[i] = opt->optimize(1, g.poses, g.links, cov);
+			ASSERT_FALSE(out[i].empty()) << what << " threads " << threads[i];
+		}
+		expectSamePoses(out[0], out[1], what);
+	}
+}
+
+TEST(GtsamThreadsTest, ThreadedBundleAdjustmentMatchesSingleThreaded)
+{
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+	std::map<int, Transform> out[2];
+	const int threads[2] = {1, 4};
+	for(int i = 0; i < 2; ++i)
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerStrategy()] =
+				uNumber2Str(static_cast<int>(Optimizer::kTypeGTSAM));
+		params[Parameters::kGTSAMThreads()]        = uNumber2Str(threads[i]);
+		params[Parameters::kOptimizerIterations()] = "200";
+		params[Parameters::kOptimizerBaseline()]   = "0.15";
+		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+		std::map<int, cv::Point3f> points = g.initialPoints3D;
+		out[i] = opt->optimizeBA(
+				/*rootId=*/1, g.initialPoses, g.links, g.models, points, g.wordReferences);
+		ASSERT_FALSE(out[i].empty()) << "threads " << threads[i];
+	}
+	expectSamePoses(out[0], out[1], "BA");
+}
+
+#endif  // RTABMAP_GTSAM

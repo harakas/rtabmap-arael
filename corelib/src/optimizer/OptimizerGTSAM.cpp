@@ -71,6 +71,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "vertigo/gtsam/betweenFactorSwitchable.h"
 #include "vertigo/gtsam/switchVariableLinear.h"
 #endif
+#ifdef GTSAM_USE_TBB
+#include <tbb/task_arena.h>
+#endif
 #endif // end RTABMAP_GTSAM
 
 namespace rtabmap {
@@ -78,6 +81,7 @@ namespace rtabmap {
 OptimizerGTSAM::OptimizerGTSAM(const ParametersMap & parameters) :
 	Optimizer(parameters),
 	internalOptimizerType_(Parameters::defaultGTSAMOptimizer()),
+	threads_(Parameters::defaultGTSAMThreads()),
 	pixelVariance_(Parameters::defaultOptimizerPixelVariance()),
 	disparityVariance_(Parameters::defaultOptimizerDisparityVariance()),
 	robustKernelDelta_(Parameters::defaultOptimizerRobustKernelDelta()),
@@ -110,6 +114,13 @@ void OptimizerGTSAM::parseParameters(const ParametersMap & parameters)
 	Optimizer::parseParameters(parameters);
 #ifdef RTABMAP_GTSAM
 	Parameters::parse(parameters, Parameters::kGTSAMOptimizer(), internalOptimizerType_);
+	Parameters::parse(parameters, Parameters::kGTSAMThreads(), threads_);
+	if(threads_ < 0)
+	{
+		UWARN("%s=%d is invalid (0=TBB's default, n=at most n threads), using 0.",
+			Parameters::kGTSAMThreads().c_str(), threads_);
+		threads_ = 0;
+	}
 	Parameters::parse(parameters, Parameters::kOptimizerPixelVariance(), pixelVariance_);
 	Parameters::parse(parameters, Parameters::kOptimizerDisparityVariance(), disparityVariance_);
 	Parameters::parse(parameters, Parameters::kOptimizerRobustKernelDelta(), robustKernelDelta_);
@@ -159,6 +170,33 @@ void OptimizerGTSAM::parseParameters(const ParametersMap & parameters)
 }
 
 std::map<int, Transform> OptimizerGTSAM::optimize(
+		int rootId,
+		const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & edgeConstraints,
+		cv::Mat & outputCovariance,
+		std::list<std::map<int, Transform> > * intermediateGraphes,
+		double * finalError,
+		int * iterationsDone)
+{
+#if defined(RTABMAP_GTSAM) && defined(GTSAM_USE_TBB)
+	if(threads_ > 0)
+	{
+		// GTSAM's parallel work runs on TBB tasks; an arena confines it to
+		// threads_ threads without limiting the process's other TBB users
+		std::map<int, Transform> optimizedPoses;
+		tbb::task_arena arena(threads_);
+		arena.execute([&]{
+			optimizedPoses = optimizeImpl(rootId, poses, edgeConstraints, outputCovariance,
+				intermediateGraphes, finalError, iterationsDone);
+		});
+		return optimizedPoses;
+	}
+#endif
+	return optimizeImpl(rootId, poses, edgeConstraints, outputCovariance,
+		intermediateGraphes, finalError, iterationsDone);
+}
+
+std::map<int, Transform> OptimizerGTSAM::optimizeImpl(
 		int rootId,
 		const std::map<int, Transform> & poses,
 		const std::multimap<int, Link> & edgeConstraints,
@@ -1154,6 +1192,31 @@ static inline gtsam::Symbol point3dSymbol(int id)
 #endif
 
 std::map<int, Transform> OptimizerGTSAM::optimizeBA(
+		int rootId,
+		const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links,
+		const std::map<int, std::vector<CameraModel> > & models,
+		std::map<int, cv::Point3f> & points3DMap,
+		const std::map<int, std::map<int, FeatureBA> > & wordReferences,
+		BAOutliers * outliers)
+{
+#if defined(RTABMAP_GTSAM) && defined(GTSAM_USE_TBB)
+	if(threads_ > 0)
+	{
+		// see optimize()
+		std::map<int, Transform> optimizedPoses;
+		tbb::task_arena arena(threads_);
+		arena.execute([&]{
+			optimizedPoses = optimizeBAImpl(rootId, poses, links, models, points3DMap,
+				wordReferences, outliers);
+		});
+		return optimizedPoses;
+	}
+#endif
+	return optimizeBAImpl(rootId, poses, links, models, points3DMap, wordReferences, outliers);
+}
+
+std::map<int, Transform> OptimizerGTSAM::optimizeBAImpl(
 		int rootId,
 		const std::map<int, Transform> & poses,
 		const std::multimap<int, Link> & links,

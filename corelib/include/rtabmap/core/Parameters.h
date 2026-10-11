@@ -496,6 +496,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(GTSAM, Incremental,     bool, false,     uFormat("Do graph optimization incrementally (iSAM2) to increase optimization speed on loop closures. Note that only GaussNewton and Dogleg optimization algorithms are supported (%s) in this mode.", kGTSAMOptimizer().c_str()));
     RTABMAP_PARAM(GTSAM, IncRelinearizeThreshold,  double, 0.01, "Only relinearize variables whose linear delta magnitude is greater than this threshold. See GTSAM::ISAM2 doc for more info.");
     RTABMAP_PARAM(GTSAM, IncRelinearizeSkip,       int, 1, "Only relinearize any variables every X calls to ISAM2::update(). See GTSAM::ISAM2 doc for more info.");
+    RTABMAP_PARAM(GTSAM, Threads,         int, 0,          "Threads of a GTSAM solve (graph optimization and bundle adjustment), where GTSAM is built with TBB: 0 = TBB's default (every core), n = at most n threads.");
 
     RTABMAP_PARAM(Ceres, Threads,         int, 1,          uFormat("Threads of a Ceres solve, Ceres' Solver::Options::num_threads. Applies to bundle adjustment, and to graph optimization when %s is false. The sparse factorization's BLAS can use threads of its own, set by the OPENBLAS_NUM_THREADS or OMP_NUM_THREADS environment variables.", kCeresPoseGraphSingleThread().c_str()));
     RTABMAP_PARAM(Ceres, PoseGraphSingleThread, bool, true,    uFormat("Run graph optimization on one thread, whatever %s asks for. Bundle adjustment is not affected.", kCeresThreads().c_str()));
