@@ -22,9 +22,9 @@ dependencies = [
 
 [[package]]
 name = "arael"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e58569eb14af5622ac4856ce39a5ec3a98dd8d92abb8fee6e25796257def33e4"
+checksum = "6c65c62604f13827139b6e80f5cbcbb755d088760f1ec2a4e94bcca897dd898c"
 dependencies = [
  "arael-faer",
  "arael-macros",
@@ -43,19 +43,20 @@ dependencies = [
 
 [[package]]
 name = "arael-faer"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc18d24660c79d67f6ec1715018533c66868634b40c94d4159eae06ef8dadbd1"
+checksum = "d2487f186daf5248b5299134f34327d1dc34cf6429d7cd9383a40dfeb157d1e7"
 dependencies = [
  "faer",
  "nano-gemm",
+ "private-gemm-x86",
 ]
 
 [[package]]
 name = "arael-macros"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8826e0f105967c10aab491ae86ff89fe46008e008bda7075672850d45320063"
+checksum = "0c9ad3f43cec35f2972ca64897502e14bb7961146a034feda5b7671701693040"
 dependencies = [
  "arael-sym",
  "arael-sym-macros",
@@ -66,18 +67,18 @@ dependencies = [
 
 [[package]]
 name = "arael-sym"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2048dad44b2ffb2f07c2a7c84123d33a98ff095172baa333ce77f2188c272109"
+checksum = "fffc6407186026541610d99d81a0945563b641119e1ba086ec224d700d1d9f55"
 dependencies = [
  "arael-sym-macros",
 ]
 
 [[package]]
 name = "arael-sym-macros"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b40911e73cfeef1bcd853b4406bf80a8f427889424a330bc0a1761b5cdd8d61"
+checksum = "bc73035b707e3476f3422d0bcc034b2302a1db8b268eccbedf5cb390a9a7e9da"
 dependencies = [
  "proc-macro2",
  "quote",

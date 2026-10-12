@@ -34,13 +34,11 @@ fn se2_err(pa: vect2sym, ra: matrix2sym, tha: E, pb: vect2sym, thb: E, dx: E, dy
 }
 
 /// The doubled vector part of the quaternion of rotation matrix `r`.
-// `.row(i)` rather than `[i]`: arael 0.9.0 does not compile an indexed
-// read inside a typed function.
 #[arael::function]
 fn quat_vec2(r: matrix3sym) -> vect3sym {
     let s = r - r.transpose();
-    let denom = safe_sqrt(r.row(0).x + r.row(1).y + r.row(2).z + 1.0);
-    vect3sym::from_components(s.row(2).y / denom, s.row(0).z / denom, s.row(1).x / denom)
+    let denom = safe_sqrt(r[0].x + r[1].y + r[2].z + 1.0);
+    vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom)
 }
 
 /// A 6-row residual `[t; rot]` whitened by the upper-triangular square
