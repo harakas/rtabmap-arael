@@ -422,6 +422,9 @@ std::map<int, Transform> optimize2d(
 	if(!newestIsRoot)
 	{
 		cfg.covariance = ra::CovMode::PerQuery;
+		// minimum degree directly: pricing it against nested dissection
+		// costs more than it saves on rtabmap's graphs
+		cfg.covariance_ordering = ra::CovOrdering::Amd;
 	}
 
 	// root id 0: no fixed root (priors anchor the graph); threads=0: every core
@@ -814,6 +817,9 @@ std::map<int, Transform> optimize3d(
 	if(!newestIsRoot)
 	{
 		cfg.covariance = ra::CovMode::PerQuery;
+		// minimum degree directly: pricing it against nested dissection
+		// costs more than it saves on rtabmap's graphs
+		cfg.covariance_ordering = ra::CovOrdering::Amd;
 	}
 
 	// root id 0: no fixed root (priors anchor the graph); threads=0: every core
