@@ -7,6 +7,9 @@
  * sessions), so every backend starts from the same odometry-shaped guess and
  * runs are exactly repeatable. Each solve runs in a forked child (isolated
  * timing and peak memory); repetitions are interleaved across backends.
+ * Before the timed solve, each child solves the same problem untimed with
+ * a separate optimizer (--warmup), so the time excludes what a process pays
+ * once: lazy initialization, thread pools, first use of memory.
  *
  * Backends report their final error in incompatible conventions, so results
  * are scored with one reference: the Ceres-convention cost (0.5 * sum of
@@ -67,6 +70,9 @@ static void showUsage()
 		"  Bundle adjustment (--ba) needs a database.\n\n"
 		"  Options:\n"
 		"     --reps #        Repetitions per backend, interleaved (default 5); the median is reported.\n"
+		"     --warmup #      Untimed solves of the same problem in each child before the timed one\n"
+		"                     (default 1), so the time excludes one-time process costs. 0 times\n"
+		"                     the first solve of a fresh process.\n"
 		"     --iterations #  Maximum solver iterations (default 100).\n"
 		"     --epsilon #.#   Stop when the error improvement is less than this value (default 0.00001,\n"
 		"                     every backend's own convention, like Optimizer/Epsilon).\n"
@@ -322,6 +328,19 @@ struct RunResult
 	bool ok;
 };
 
+static std::unique_ptr<Optimizer> makeOptimizer(Optimizer::Type type,
+		const ParametersMap & parameters,
+		int iterations,
+		double epsilon,
+		bool slam2d)
+{
+	std::unique_ptr<Optimizer> opt(Optimizer::create(type, parameters));
+	opt->setSlam2d(slam2d);
+	opt->setIterations(iterations);
+	opt->setEpsilon(epsilon);
+	return opt;
+}
+
 // One solve in a forked child: clean timing, per-run peak memory, and a
 // crashing backend cannot take the benchmark down.
 static RunResult runOnce(Optimizer::Type type,
@@ -329,6 +348,7 @@ static RunResult runOnce(Optimizer::Type type,
 		int iterations,
 		double epsilon,
 		bool slam2d,
+		int warmups,
 		int rootId,
 		const std::map<int, Transform> & poses,
 		const std::multimap<int, Link> & links)
@@ -345,10 +365,13 @@ static RunResult runOnce(Optimizer::Type type,
 	if(pid == 0)
 	{
 		close(fd[0]);
-		std::unique_ptr<Optimizer> opt(Optimizer::create(type, parameters));
-		opt->setSlam2d(slam2d);
-		opt->setIterations(iterations);
-		opt->setEpsilon(epsilon);
+		for(int w = 0; w < warmups; ++w)
+		{
+			cv::Mat warmCov;
+			makeOptimizer(type, parameters, iterations, epsilon, slam2d)->optimize(
+				rootId, poses, links, warmCov);
+		}
+		std::unique_ptr<Optimizer> opt = makeOptimizer(type, parameters, iterations, epsilon, slam2d);
 		cv::Mat cov;
 		double err = -1.0;
 		int iters = 0;
@@ -396,6 +419,7 @@ static RunResult runOnceBA(Optimizer::Type type,
 		int iterations,
 		double epsilon,
 		bool slam2d,
+		int warmups,
 		int rootId,
 		const std::map<int, Transform> & poses,
 		const std::multimap<int, Link> & links,
@@ -420,10 +444,14 @@ static RunResult runOnceBA(Optimizer::Type type,
 	if(pid == 0)
 	{
 		close(fd[0]);
-		std::unique_ptr<Optimizer> opt(Optimizer::create(type, parameters));
-		opt->setSlam2d(slam2d);
-		opt->setIterations(iterations);
-		opt->setEpsilon(epsilon);
+		for(int w = 0; w < warmups; ++w)
+		{
+			std::map<int, cv::Point3f> warmPoints = points3DMap;
+			BAOutliers warmOutliers;
+			makeOptimizer(type, parameters, iterations, epsilon, slam2d)->optimizeBA(
+				rootId, poses, links, models, warmPoints, wordReferences, &warmOutliers);
+		}
+		std::unique_ptr<Optimizer> opt = makeOptimizer(type, parameters, iterations, epsilon, slam2d);
 		std::map<int, cv::Point3f> points = points3DMap; // refined in place
 		BAOutliers outliers;
 		UTimer timer;
@@ -835,6 +863,7 @@ static int runBaBenchmark(const std::string & dbPath,
 		int iterations,
 		double epsilon,
 		bool slam2d,
+		int warmups,
 		int rootId,
 		const std::map<int, Transform> & posesGuess,
 		const std::multimap<int, Link> & links)
@@ -991,7 +1020,7 @@ static int runBaBenchmark(const std::string & dbPath,
 		for(size_t i = 0; i < rows.size(); ++i)
 		{
 			results[i].push_back(runOnceBA(rows[i].type, rows[i].params, iterations,
-				epsilon, slam2d, baRoot, prePoses, links, models, points3DMap,
+				epsilon, slam2d, warmups, baRoot, prePoses, links, models, points3DMap,
 				wordReferences, pixelVariance, disparityVariance, robustKernelDelta,
 				baseline, covarianceIgnored));
 		}
@@ -1049,6 +1078,7 @@ int main(int argc, char * argv[])
 	ULogger::setLevel(ULogger::kError);
 
 	int reps = 5;
+	int warmups = 1;
 	int iterations = 100;
 	double epsilon = 0.00001;
 	bool slam2d = false;
@@ -1074,6 +1104,10 @@ int main(int argc, char * argv[])
 		else if(strcmp(argv[i], "--reps") == 0 && i + 1 < argc)
 		{
 			reps = atoi(argv[++i]);
+		}
+		else if(strcmp(argv[i], "--warmup") == 0 && i + 1 < argc)
+		{
+			warmups = atoi(argv[++i]);
 		}
 		else if(strcmp(argv[i], "--iterations") == 0 && i + 1 < argc)
 		{
@@ -1111,7 +1145,7 @@ int main(int argc, char * argv[])
 			showUsage();
 		}
 	}
-	if(dbPath.empty() || reps < 1)
+	if(dbPath.empty() || reps < 1 || warmups < 0)
 	{
 		showUsage();
 	}
@@ -1245,15 +1279,15 @@ int main(int argc, char * argv[])
 		}
 	}
 
-	printf("db=%s poses=%zu links=%zu initial_cost=%.4f mode=%s%s iterations=%d epsilon=%g reps=%d\n",
+	printf("db=%s poses=%zu links=%zu initial_cost=%.4f mode=%s%s iterations=%d epsilon=%g reps=%d warmup=%d\n",
 		dbPath.c_str(), poses.size(), usable.size(),
 		refCost(poses, usable, slam2d), slam2d ? "2d" : "3d", ba ? "+ba" : "",
-		iterations, epsilon, reps);
+		iterations, epsilon, reps, warmups);
 
 	if(ba)
 	{
 		return runBaBenchmark(dbPath, parameters, strategies, reps, iterations, epsilon,
-			slam2d, rootId, poses, usable);
+			slam2d, warmups, rootId, poses, usable);
 	}
 
 	std::map<Optimizer::Type, std::vector<RunResult> > results;
@@ -1262,7 +1296,7 @@ int main(int argc, char * argv[])
 		for(Optimizer::Type t : strategies)
 		{
 			results[t].push_back(
-				runOnce(t, parameters, iterations, epsilon, slam2d, rootId, poses, usable));
+				runOnce(t, parameters, iterations, epsilon, slam2d, warmups, rootId, poses, usable));
 		}
 	}
 
