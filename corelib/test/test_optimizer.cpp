@@ -2464,6 +2464,58 @@ TEST(AraelBaPruneTest, PruneStageKeepsThePoses)
 }
 
 // ---------------------------------------------------------------------------
+// AraelBaIterationsTest -- the single robust solve runs Optimizer/Iterations
+// + 5 iterations, the budget of the two-pass flows. With Arael/BaRobustC2
+// far above every residual the robust loss is plain least squares, so a
+// robust solve at 1 iteration lands where a non-robust one at 6 does.
+// ---------------------------------------------------------------------------
+TEST(AraelBaIterationsTest, RobustSolveGetsFiveMoreIterations)
+{
+	if(!Optimizer::isAvailable(Optimizer::kTypeArael))
+	{
+		GTEST_SKIP() << "arael not built in";
+	}
+	BundleGraph g = buildBundleGraph(/*noisy=*/true);
+
+	auto solve = [&](bool robust, int iterations)
+	{
+		ParametersMap params;
+		params[Parameters::kOptimizerStrategy()] =
+				uNumber2Str(static_cast<int>(Optimizer::kTypeArael));
+		params[Parameters::kOptimizerIterations()] = uNumber2Str(iterations);
+		params[Parameters::kOptimizerEpsilon()]    = "0";
+		params[Parameters::kOptimizerBaseline()]   = "0.15";
+		params[Parameters::kOptimizerRobustKernelDelta()] = robust ? "8" : "0";
+		params[Parameters::kAraelBaRobustC2()]     = "1e12";
+		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
+		std::map<int, cv::Point3f> outPoints = g.initialPoints3D;
+		return opt->optimizeBA(
+				/*rootId=*/1, g.initialPoses, g.links, g.models, outPoints, g.wordReferences);
+	};
+	// largest pose distance between two solutions, each in its root frame
+	auto maxDistance = [](const std::map<int, Transform> & a, const std::map<int, Transform> & b)
+	{
+		const Transform aRootInv = a.at(1).inverse();
+		const Transform bRootInv = b.at(1).inverse();
+		float d = 0.0f;
+		for(const auto & kv : a)
+		{
+			d = std::max(d, (aRootInv * kv.second).getDistance(bRootInv * b.at(kv.first)));
+		}
+		return d;
+	};
+
+	const std::map<int, Transform> robust1 = solve(true, 1);
+	const std::map<int, Transform> plain6 = solve(false, 6);
+	const std::map<int, Transform> plain1 = solve(false, 1);
+	ASSERT_FALSE(robust1.empty());
+	ASSERT_FALSE(plain6.empty());
+	ASSERT_FALSE(plain1.empty());
+	EXPECT_LT(maxDistance(robust1, plain6), 1e-4f);
+	EXPECT_GT(maxDistance(robust1, plain1), 1e-3f);
+}
+
+// ---------------------------------------------------------------------------
 // Regression test: wordReferences with negative ids. optimizeBA() puts no sign
 // restriction on them, and each backend remaps differently: g2o shifts landmark
 // vertices by negVertexOffset, GTSAM packs the index into a gtsam::Symbol's 56

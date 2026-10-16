@@ -1345,7 +1345,9 @@ std::map<int, Transform> OptimizerArael::optimizeBA(
 	// the robust loss handles outliers during the solve; Arael/BaPruneChi2
 	// additionally prunes them and re-solves (converge-prune-refine)
 	const bool prune = robust && baPruneChi2_ > 0.0 && !obsMeta.empty();
-	cfg.max_iters = iterations();
+	// the single robust solve gets the budget of the g2o and Ceres two-pass
+	// flows: 5 iterations, then Optimizer/Iterations
+	cfg.max_iters = robust && !prune ? iterations() + 5 : iterations();
 	if(threads() >= 0)
 	{
 		cfg.num_threads = threads();
