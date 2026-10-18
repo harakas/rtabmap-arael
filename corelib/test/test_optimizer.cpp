@@ -2465,9 +2465,10 @@ TEST(AraelBaPruneTest, PruneStageKeepsThePoses)
 
 // ---------------------------------------------------------------------------
 // AraelBaIterationsTest -- the single robust solve runs Optimizer/Iterations
-// + 5 iterations, the budget of the two-pass flows. With Arael/BaRobustC2
-// far above every residual the robust loss is plain least squares, so a
-// robust solve at 1 iteration lands where a non-robust one at 6 does.
+// + 5 iterations, the budget of the two-pass flows. The Huber loss with
+// Arael/BaRobustC2 far above every residual is exactly plain least squares
+// (rho(s) = s below the knee), so a robust solve at 1 iteration lands where a
+// non-robust one at 6 does.
 // ---------------------------------------------------------------------------
 TEST(AraelBaIterationsTest, RobustSolveGetsFiveMoreIterations)
 {
@@ -2486,6 +2487,7 @@ TEST(AraelBaIterationsTest, RobustSolveGetsFiveMoreIterations)
 		params[Parameters::kOptimizerEpsilon()]    = "0";
 		params[Parameters::kOptimizerBaseline()]   = "0.15";
 		params[Parameters::kOptimizerRobustKernelDelta()] = robust ? "8" : "0";
+		params[Parameters::kAraelBaRobustLoss()]   = "2";
 		params[Parameters::kAraelBaRobustC2()]     = "1e12";
 		std::unique_ptr<Optimizer> opt(Optimizer::create(params));
 		std::map<int, cv::Point3f> outPoints = g.initialPoints3D;
