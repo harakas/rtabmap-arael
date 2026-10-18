@@ -72,8 +72,9 @@ instead of being rejected outright:
 ```
 
 - **Geman-McClure** (default): effectively switches a bad closure
-  off. On the corrupted-closure database below it matches
-  GTSAM-Vertigo to 1.2 cm, in 5.4 ms vs 80.7 ms.
+  off. On rtabmap's corrupted-closure test database it lands about as
+  close to GTSAM-Vertigo's trajectory as g2o-Vertigo does, in a fraction
+  of the time (Benchmark, Robust mode).
 - **Cauchy**: limits a bad closure's influence but never switches it
   off; it leaves some deformation on large corruptions.
 
@@ -87,78 +88,229 @@ the Vertigo backends.
 
 ## Benchmark
 
-`rtabmap-optimizerBenchmark <db> --reps 5` on the databases fetched by
-`scripts/fetch_test_data.sh`: cold solve of the database's pose graph
-from an odometry-composed initial guess, one link per pair, median of
-5 forked runs, single-threaded. Cost is the Ceres-convention cost
-evaluated at each backend's output.
+Every backend on rtabmap's test data (`scripts/fetch_test_data.sh`),
+measured with `rtabmap-optimizerBenchmark` on an AMD Ryzen 9 7950X3D under
+Ubuntu 24.04. Every backend runs with rtabmap's default settings, which
+are not necessarily each library's fastest configuration; TORO is not
+included. Each solve runs in its own forked process after one untimed
+solve of the same problem, so the times leave out one-time process costs.
+A time is the median over 3 rounds of each round's median run.
+Single-threaded runs are pinned to one core, with BLAS (the linear algebra
+library under Ceres) and OpenMP at one thread and `GTSAM/Threads` 1.
 
-Cells: solve ms / iterations / final cost / maxrss MB.
+### Pose graphs
 
-| database | poses/links | arael | Ceres | GTSAM | g2o | TORO |
-|---|---|---|---|---|---|---|
-| 2loops_workspace_3IT | 127/204 | 3.0 / 6 / 123.0414 / 31 | 4.8 / 6 / 123.0414 / 42 | 12.0 / 6 / 123.0452 / 53 | 4.2 / 8 / 132.45 / 34 | 8.6 / 100 / 1165.0 / 28 |
-| loop_3it_gps | 299/301 | 3.2 / 3 / 33.5624 / 32 | 9.2 / 8 / 33.5625 / 43 | 13.8 / 6 / 33.5624 / 54 | 9.8 / 13 / 33.68 / 36 | 9.7 / 100 / 5049.0 / 29 |
-| multisession_3it | 935/1206 | 10.1 / 5 / 349.1020 / 38 | 99.7 / 28 / 349.1068 / 51 | 30.2 / 6 / 349.1031 / 63 | 110.1 / 46 / 351.71 / 43 | 44.7 / 100 / 578.2 / 33 |
-| robust_graph_optimization_stereo [1] | 111/144 | 3.6 / 21 / 11765.26 / 30 | 8.9 / 19 / 11765.37 / 41 | 40.9 / 77 / 11811.2 / 53 | 15.1 / 60 / 19864.0 / 34 | 4.9 / 100 / 19091.7 / 28 |
+Cold solve from an initial guess composed from the links. Each backend
+is timed to convergence: the fewest iterations whose result comes within
+1e-5 of that backend's own result after 1000 iterations, found on the
+same problem, then timed at that count with 5 runs a round:
 
-arael, g2o and GTSAM compute the newest pose's marginal covariance
-inside these times; Ceres and TORO return a placeholder.
+```
+rtabmap-optimizerBenchmark --converge --reps 5 --2d data/tests/large_reduced_graph.g2o
+rtabmap-optimizerBenchmark --converge --reps 5 data/tests/multisession_3it.db
+```
 
-[1] Deliberately corrupted loop closures (Vertigo demo data); all
-backends run non-robust here, so the optimum itself is
-outlier-contaminated.
+The final cost is the Ceres backend's cost at each backend's output;
+arael uses the same residuals. g2o and GTSAM minimize their own
+pose-error definitions, so their converged result can sit above the
+others' on this scale. arael, g2o and GTSAM compute the newest pose's
+marginal covariance inside these times; Ceres returns a placeholder.
 
-## Bundle adjustment benchmark
+#### large_reduced_graph.g2o (2D, 15,879 poses, 25,782 links)
 
-`rtabmap-optimizerBenchmark --ba --reps 5 <db>` on the same databases:
-the BA problem is built once from the database features and every
-backend solves that identical problem in a forked child, with its
-default settings. Scored with pixel-error percentiles over ALL
-observations at each backend's output, so removing an observation
-cannot improve a score. Solve time excludes the shared problem
-construction.
+| backend | iterations | time to converge ms | final cost | peak memory MB |
+|---|---|---|---|---|
+| arael | 4 | 87.3 | 1659.9156 | 154 |
+| Ceres | 7 | 480.3 | 1659.9293 | 203 |
+| GTSAM | 4 | 446.6 | 1660.7499 | 194 |
+| g2o | 11 | 398.8 | 1659.9250 | 166 |
 
-Cells: solve ms / px p50 / p90 / p99 / maxrss MB. arael-cg is
-`Arael/BaSolve` 1.
+#### large_mapping_session.g2o (2D, 9,032 poses, 11,949 links)
 
-| database | obs | g2o | Ceres | arael | arael-cg |
+| backend | iterations | time to converge ms | final cost | peak memory MB |
+|---|---|---|---|---|
+| arael | 6 | 45.2 | 302.8294 | 83 |
+| Ceres | 18 | 413.0 | 302.8298 | 109 |
+| GTSAM | 6 | 267.2 | 302.8326 | 108 |
+| g2o | 185 | 1883 | 16034.3054 | 87 |
+
+#### multisession_3it (3D, 935 poses, 1,206 links)
+
+| backend | iterations | time to converge ms | final cost | peak memory MB |
+|---|---|---|---|---|
+| arael | 4 | 9.35 | 349.1045 | 42 |
+| Ceres | 27 | 130.8 | 349.1068 | 48 |
+| GTSAM | 3 | 20.7 | 349.1037 | 52 |
+| g2o | 44 | 144.1 | 351.7099 | 42 |
+
+#### loop_3it_gps (3D, 299 poses, 301 links)
+
+| backend | iterations | time to converge ms | final cost | peak memory MB |
+|---|---|---|---|---|
+| arael | 2 | 1.75 | 33.5625 | 34 |
+| Ceres | 7 | 9.73 | 33.5625 | 40 |
+| GTSAM | 2 | 6.39 | 33.5625 | 46 |
+| g2o | 12 | 8.74 | 33.6751 | 35 |
+
+#### 2loops_workspace_3IT (3D, 127 poses, 204 links)
+
+| backend | iterations | time to converge ms | final cost | peak memory MB |
+|---|---|---|---|---|
+| arael | 5 | 1.77 | 123.0414 | 33 |
+| Ceres | 5 | 5.07 | 123.0414 | 38 |
+| GTSAM | 3 | 4.14 | 123.0453 | 45 |
+| g2o | 7 | 3.96 | 132.4484 | 33 |
+
+#### robust_graph_optimization_stereo (3D, 111 poses, 144 links) [1]
+
+| backend | iterations | time to converge ms | final cost | peak memory MB |
+|---|---|---|---|---|
+| arael | 20 | 3.44 | 11765.3531 | 33 |
+| Ceres | 18 | 10.3 | 11765.3650 | 38 |
+| GTSAM | 28 | 15.3 | 11811.1206 | 44 |
+| g2o | 59 | 15.1 | 19864.0439 | 32 |
+
+[1] Deliberately corrupted loop closures (Vertigo demo data). Every
+backend runs without a robust loss here, so the optimum itself is
+pulled by the bad closures; robust mode follows.
+
+### Robust mode
+
+`Optimizer/Robust true` on the corrupted-closure database: g2o and GTSAM
+with Vertigo switchable constraints, arael with its loss. These are
+different methods for the same task, not one problem, so the table shows
+where each lands and how long it takes. The database has no ground
+truth; the distance is the aligned translational RMSE from GTSAM-Vertigo's
+trajectory, solved in the same run (`--ref-strategy 2`).
+
+#### robust_graph_optimization_stereo
+
+| method | iterations | time to converge ms | distance from GTSAM, Vertigo cm |
+|---|---|---|---|
+| arael, Geman-McClure | 10 | 2.03 | 1.23 |
+| arael, Cauchy | 5 | 1.35 | 1.35 |
+| GTSAM, Vertigo | 15 | 11.3 | 0.00 |
+| g2o, Vertigo | 20 | 6.24 | 1.29 |
+
+### Bundle adjustment as shipped
+
+The bundle adjustment problem is built once from the database features
+and every backend solves that same problem in a forked process, at most
+20 iterations (`Optimizer/Iterations`). The backends handle outliers
+differently, as rtabmap ships them: g2o, Ceres and GTSAM run at most 5
+iterations, remove the observations above `Optimizer/RobustKernelDelta`,
+then run at most 20; arael runs one solve of at most 25 under its robust
+loss and removes nothing, reporting the observations above
+`Arael/BaRobustC2` (flagged). So the times measure different work, and
+these tables compare rtabmap's bundle adjustment as it ships, not solvers
+on one problem.
+
+```
+rtabmap-optimizerBenchmark --ba --iterations 20 --reps 3 data/tests/2loops_workspace_3IT.db
+```
+
+The pixel error is the left-image reprojection error, over the
+observations each backend kept and over all observations; p50 and p99
+are the errors that 50% and 99% of them stay under. Neither view is an
+accuracy verdict: these maps have no ground truth, a backend that removes
+observations fits the rest more closely, and the removed ones count
+against it over all observations. Feature matching makes the problem
+differ by a few observations from run to run; all backends of one run
+share it. arael-cg is `Arael/BaSolve` 1. GTSAM runs once per database:
+its bundle adjustment takes minutes on the larger databases.
+
+#### multisession_3it (155,613 observations)
+
+| backend | observations removed | flagged, kept | kept p50 | kept p99 | all p50 | all p99 | time ms |
+|---|---|---|---|---|---|---|---|
+| arael | 0 (0.0%) | 25 | 0.60 | 3.79 | 0.60 | 3.79 | 1370 |
+| arael-cg | 0 (0.0%) | 25 | 0.60 | 3.80 | 0.60 | 3.80 | 11337 |
+| Ceres | 9,278 (6.0%) | 0 | 0.54 | 2.44 | 0.57 | 49.0 | 47331 |
+| GTSAM | 6,901 (4.4%) | 0 | 0.53 | 2.37 | 0.55 | 9.18 | 589029 |
+| g2o | 12,624 (8.1%) | 0 | 0.49 | 2.16 | 0.53 | 62.7 | 2653 |
+
+#### 2loops_workspace_3IT (25,601 observations)
+
+| backend | observations removed | flagged, kept | kept p50 | kept p99 | all p50 | all p99 | time ms |
+|---|---|---|---|---|---|---|---|
+| arael | 0 (0.0%) | 0 | 0.74 | 3.94 | 0.74 | 3.94 | 73.5 |
+| arael-cg | 0 (0.0%) | 0 | 0.74 | 3.94 | 0.74 | 3.94 | 134.7 |
+| Ceres | 1,568 (6.1%) | 0 | 0.66 | 2.42 | 0.70 | 35.2 | 1592 |
+| GTSAM | 1,767 (6.9%) | 0 | 0.63 | 2.39 | 0.68 | 26.1 | 35347 |
+| g2o | 2,420 (9.5%) | 0 | 0.61 | 2.23 | 0.68 | 46.5 | 314.3 |
+
+#### robust_graph_optimization_stereo (11,410 observations) [2]
+
+| backend | observations removed | flagged, kept | kept p50 | kept p99 | all p50 | all p99 | time ms |
+|---|---|---|---|---|---|---|---|
+| arael | 0 (0.0%) | 301 | 0.77 | 854.0 | 0.77 | 854.0 | 93.3 |
+| arael-cg | 0 (0.0%) | 285 | 0.78 | 914.9 | 0.78 | 914.9 | 201.2 |
+| Ceres | 5,053 (44.3%) | 0 | 0.42 | 1.96 | 0.98 | 3643.2 | 468.4 |
+| GTSAM | 6,180 (54.2%) | 0 | 0.39 | 1.99 | 1.94 | 6062.2 | 38080 |
+| g2o | 3,510 (30.8%) | 0 | 0.41 | 2.02 | 0.65 | 869.5 | 129.8 |
+
+#### loop_3it_gps (6,342 observations)
+
+| backend | observations removed | flagged, kept | kept p50 | kept p99 | all p50 | all p99 | time ms |
+|---|---|---|---|---|---|---|---|
+| arael | 0 (0.0%) | 0 | 0.48 | 2.21 | 0.48 | 2.21 | 28.7 |
+| arael-cg | 0 (0.0%) | 0 | 0.48 | 2.19 | 0.48 | 2.19 | 1321 |
+| Ceres | 30 (0.5%) | 0 | 0.48 | 2.00 | 0.48 | 2.16 | 479.3 |
+| GTSAM | 39 (0.6%) | 0 | 0.46 | 2.00 | 0.46 | 2.25 | 6683 |
+| g2o | 47 (0.7%) | 0 | 0.45 | 1.97 | 0.46 | 2.32 | 115.8 |
+
+[2] Deliberately corrupted loop closures. g2o, Ceres and GTSAM remove a
+third to a half of the observations and fit the rest closely; arael
+keeps them all, and the corruption shows in its p99.
+
+### Threads
+
+arael against itself at 1, 2, 4 and 8 threads (`Arael/Threads`; pose
+graphs with `Arael/PoseGraphSingleThread` false; bundle adjustment as
+shipped), not pinned, 3 rounds. Every thread count reaches the same
+pose-graph result in the same iterations.
+
+| case | 1 thread ms | 2 threads ms | 4 threads ms | 8 threads ms | speedup at 8 |
 |---|---|---|---|---|---|
-| 2loops_workspace_3IT | 25.6k | 457 / 0.68 / 2.0 / 47.4 / 71 | 1098 / 0.70 / 1.9 / 35.1 / 69 | 59 / 0.74 / 1.9 / 3.9 / 56 | 97 / 0.74 / 1.9 / 3.9 / 54 |
-| loop_3it_gps | 6.4k | 207 / 0.46 / 1.1 / 2.1 / 46 | 509 / 0.48 / 1.2 / 2.0 / 44 | 24 / 0.48 / 1.2 / 2.1 / 40 | 1120 / 0.48 / 1.2 / 2.1 / 38 |
-| robust_graph_optimization_stereo [1] | 11.4k | 401 / 0.83 / 115.5 / 430 / 52 | 1604 / 0.81 / 645.2 / 6284 / 50 | 92 / 0.76 / 3.0 / 1281 / 43 | 418 / 0.76 / 2.9 / 1173 / 42 |
-| multisession_3it | 155.4k | 7847 / 0.53 / 1.6 / 43.2 / 274 | 48902 / 0.57 / 1.6 / 9.5 / 267 | 1362 / 0.60 / 1.7 / 3.8 / 222 | 17951 / 0.60 / 1.7 / 3.8 / 194 |
+| large_reduced_graph.g2o | 100.6 | 85.5 | 77.4 | 71.3 | 1.41x |
+| large_mapping_session.g2o | 49.4 | 46.7 | 39.8 | 37.5 | 1.32x |
+| multisession_3it | 10.1 | 9.80 | 8.31 | 8.16 | 1.24x |
+| 2loops_workspace_3IT | 2.02 | 2.34 | 2.29 | 2.56 | 0.79x |
+| bundle adjustment multisession_3it | 1281 | 821.1 | 590.3 | 496.5 | 2.58x |
+| bundle adjustment 2loops_workspace_3IT | 82.8 | 47.8 | 36.3 | 26.8 | 3.09x |
+| arael-cg multisession_3it | 9097 | 9959 | 9834 | 8303 | 1.10x |
+| arael-cg 2loops_workspace_3IT | 146.6 | 102.7 | 80.7 | 87.9 | 1.67x |
 
-[1] Deliberately corrupted loop closures. g2o and Ceres remove
-observations and re-solve; the corruption claims a tenth or more of
-their observations (elevated p90). arael's loss confines it to the
-tail (clean p90, elevated p99).
-
-GTSAM is not in this table: probes measured solves from 34 s (2loops)
-to about 20 minutes (multisession).
+Pose graphs run on one thread by default (`Arael/PoseGraphSingleThread`):
+threads gain less there than on bundle adjustment and slow the smallest
+graph down.
 
 ## In-pipeline replays
 
-End-to-end replays of the integration-test databases
-(`corelib/test/test_rtabmap_integration.cpp`), with the backend doing
-graph optimization and the local bundle adjustment inside the odometry
-loop. Median of 3 runs; odometry time is per frame. RMSE is against
-ground truth (Stereo20Hz has none).
+End-to-end replays of two integration-test databases
+(`corelib/test/test_rtabmap_integration.cpp`) on the same machine: rtabmap
+as it ships, with the backend doing graph optimization, the visual
+registration bundle adjustment and the odometry's local bundle
+adjustment. Each backend replays in its own process, the order rotating
+between rounds; median of 3 rounds, rtabmap's default thread settings,
+not pinned. Odometry time is per frame. RMSE is the final trajectory's
+error against ground truth (Stereo20Hz has none); replays differ from run
+to run, and the range is the lowest to the highest over the rounds.
 
-PR2_Scan2D_Stereo (261 frames, stereo + 2D laser):
+#### PR2_Scan2D_Stereo (261 frames, stereo + 2D laser)
 
-| backend | odometry ms/frame | RMSE m | wall s |
-|---|---|---|---|
-| arael | 8.3 | 0.038 | 4.5 |
-| g2o | 13.8 | 0.036 | 5.9 |
-| Ceres | 13.1 | 0.036 | 5.6 |
-| GTSAM | 38.8 | 0.036 | 12.5 |
+| backend | odometry ms/frame | RMSE m | RMSE range m | wall s |
+|---|---|---|---|---|
+| arael | 14.9 | 0.0302 | 0.0291 to 0.0308 | 7.0 |
+| Ceres | 20.5 | 0.0326 | 0.0318 to 0.0339 | 8.5 |
+| GTSAM | 60.6 | 0.0361 | 0.0321 to 0.0365 | 19.2 |
+| g2o | 20.0 | 0.0351 | 0.0325 to 0.0392 | 8.4 |
 
-Stereo20Hz (1035 frames, 20 Hz stereo):
+#### Stereo20Hz (1035 frames, 20 Hz stereo)
 
 | backend | odometry ms/frame | wall s |
 |---|---|---|
-| arael | 7.7 | 14.4 |
-| g2o | 11.6 | 18.6 |
-| Ceres | 11.4 | 18.4 |
-| GTSAM | 34.4 | 42.5 |
+| arael | 13.9 | 22.8 |
+| Ceres | 20.2 | 29.8 |
+| GTSAM | 63.1 | 75.4 |
+| g2o | 18.7 | 28.3 |
