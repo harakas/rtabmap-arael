@@ -40,6 +40,7 @@
 #include <rtabmap/core/util3d_filtering.h>
 #include <rtabmap/utilite/UFile.h>
 #include <rtabmap/utilite/UConversion.h>
+#include <rtabmap/utilite/UStl.h>
 #include <rtabmap/utilite/UTimer.h>
 #include <rtabmap/utilite/ULogger.h>
 
@@ -47,6 +48,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -74,6 +76,20 @@ std::string workDbForCurrentTest(const std::string & suffix = "")
 	}
 	return test::tempPath(uFormat("rtabmap_integration_%s_%s.db",
 			testName.c_str(), suffix.c_str()));
+}
+
+// Whether a replay variant runs: RTABMAP_TEST_REPLAY_VARIANTS lists the
+// labels to run, comma separated (e.g. "arael,g2o"); unset or empty runs
+// every variant. Lets a benchmark replay each backend in its own process.
+bool replayVariantSelected(const std::string & label)
+{
+	const char * env = std::getenv("RTABMAP_TEST_REPLAY_VARIANTS");
+	if(env == nullptr || *env == '\0')
+	{
+		return true;
+	}
+	const std::list<std::string> labels = uSplit(env, ',');
+	return std::find(labels.begin(), labels.end(), label) != labels.end();
 }
 
 // Result bundle populated by replayDatabase(). Extend as the assertions in the
@@ -1183,6 +1199,10 @@ TEST_F(RtabmapIntegrationFixture, PR2_Scan2D_Stereo)
 	int variantsTested = 0;
 	for(const Variant & v : variants)
 	{
+		if(!replayVariantSelected(v.label))
+		{
+			continue;
+		}
 		if(!Optimizer::isAvailable(v.opt))
 		{
 			std::cerr << "[skip] optimizer " << v.label << " not available\n";
@@ -1281,6 +1301,10 @@ TEST_F(RtabmapIntegrationFixture, Stereo20Hz)
 	int variantsTested = 0;
 	for(const Variant & v : variants)
 	{
+		if(!replayVariantSelected(v.label))
+		{
+			continue;
+		}
 		if(!Optimizer::isAvailable(v.opt))
 		{
 			std::cerr << "[skip] optimizer " << v.label << " not available\n";
