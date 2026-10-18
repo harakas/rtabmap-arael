@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <list>
 #include <map>
 #include <set>
@@ -74,6 +75,8 @@ static void showUsage()
 		"                     (default 1), so the time excludes one-time process costs. 0 times\n"
 		"                     the first solve of a fresh process.\n"
 		"     --iterations #  Maximum solver iterations (default 100).\n"
+		"     --pre-iterations #  Bundle adjustment: iteration cap of the pose-graph\n"
+		"                     pre-optimization that seeds it (default: --iterations).\n"
 		"     --epsilon #.#   Stop when the error improvement is less than this value (default 0.00001,\n"
 		"                     every backend's own convention, like Optimizer/Epsilon).\n"
 		"     --2d            Optimize in 2D (Reg/Force3DoF) and score with the 2D cost.\n"
@@ -84,6 +87,18 @@ static void showUsage()
 		"                     all observations at each backend's output.\n"
 		"     --strategy \"# # ...\"  Backends to run (0=TORO 1=g2o 2=GTSAM 3=Ceres 4=cvsba 5=arael);\n"
 		"                     default: all compiled-in (TORO has no BA and is skipped with --ba).\n"
+		"     --ref-strategy #  Pose graphs only: solve once with this backend first, then report each\n"
+		"                     backend's translational RMSE against that solution after aligning the\n"
+		"                     two (graph::calcRMSE), e.g. how close robust losses land to each other.\n"
+		"     --converge      Time each backend to convergence instead of at --iterations: the\n"
+		"                     fewest iterations whose result comes within --converge-tol (relative)\n"
+		"                     of the backend's own result at --converge-max, searched on the same\n"
+		"                     problem, then timed. A result needing more than half of\n"
+		"                     --converge-max is reported as not converged. --iterations still caps\n"
+		"                     the bundle adjustment's pose-graph pre-optimization.\n"
+		"     --converge-max #  Iteration cap of the convergence search (default 1000).\n"
+		"     --converge-tol #.#  Relative cost tolerance of the convergence search (default 1e-5).\n"
+		"     --udebug        Debug log on the console (the backends' solver traces).\n"
 		"     --\"parameter name\" \"value\"  Any RTAB-Map parameter, passed to the\n"
 		"                     backends (e.g. --Arael/Preset 1, --GTSAM/Optimizer 0).\n\n");
 	exit(1);
@@ -321,9 +336,14 @@ struct RunResult
 	double pxP97;
 	double pxP98;
 	double pxP99;
-	double keptCost; // BA mode only: cost excluding the backend's own rejections
+	double keptCost; // BA mode only: cost over the observations the backend kept
+	double keptP50;  // BA mode only: pixel error percentiles over the kept observations
+	double keptP90;
+	double keptP99;
+	double refRmse;  // --ref-strategy only: translational RMSE against the reference solution
 	int iterations;
-	int rejected;    // BA mode only: observations dropped by the backend
+	int removed;     // BA mode only: observations the backend dropped from its solve
+	int flagged;     // BA mode only: observations reported as outliers but kept in the solve
 	long maxRssMb;
 	bool ok;
 };
@@ -341,8 +361,91 @@ static std::unique_ptr<Optimizer> makeOptimizer(Optimizer::Type type,
 	return opt;
 }
 
+// Ends a forked child. _exit skips the stdio flush, which would drop what
+// the child printed last (a backend's debug log, a construction error).
+static void childExit(int code)
+{
+	fflush(stdout);
+	fflush(stderr);
+	_exit(code);
+}
+
+static bool readFull(int fd, void * buf, size_t size)
+{
+	char * p = (char *)buf;
+	while(size > 0)
+	{
+		const ssize_t n = read(fd, p, size);
+		if(n <= 0)
+		{
+			return false;
+		}
+		p += n;
+		size -= n;
+	}
+	return true;
+}
+
+// The --ref-strategy solution, solved in a forked child like the timed runs
+// so the parent's memory (inherited by every later child) stays untouched.
+// Empty on failure.
+static std::map<int, Transform> solveReference(Optimizer::Type type,
+		const ParametersMap & parameters,
+		int iterations,
+		double epsilon,
+		bool slam2d,
+		int rootId,
+		const std::map<int, Transform> & poses,
+		const std::multimap<int, Link> & links)
+{
+	std::map<int, Transform> ref;
+	int fd[2];
+	if(pipe(fd) != 0)
+	{
+		return ref;
+	}
+	pid_t pid = fork();
+	if(pid == 0)
+	{
+		close(fd[0]);
+		cv::Mat cov;
+		std::map<int, Transform> out =
+			makeOptimizer(type, parameters, iterations, epsilon, slam2d)->optimize(rootId, poses, links, cov);
+		for(const auto & kv : out)
+		{
+			ssize_t written = write(fd[1], &kv.first, sizeof(int));
+			written = write(fd[1], kv.second.data(), 12 * sizeof(float));
+			(void)written;
+		}
+		close(fd[1]);
+		childExit(out.empty() ? 1 : 0);
+	}
+	close(fd[1]);
+	if(pid > 0)
+	{
+		int id;
+		float m[12];
+		while(readFull(fd[0], &id, sizeof(id)) && readFull(fd[0], m, sizeof(m)))
+		{
+			ref.insert(std::make_pair(id, Transform(
+				m[0], m[1], m[2], m[3],
+				m[4], m[5], m[6], m[7],
+				m[8], m[9], m[10], m[11])));
+		}
+		int status = 0;
+		waitpid(pid, &status, 0);
+		if(status != 0)
+		{
+			ref.clear();
+		}
+	}
+	close(fd[0]);
+	return ref;
+}
+
 // One solve in a forked child: clean timing, per-run peak memory, and a
-// crashing backend cannot take the benchmark down.
+// crashing backend cannot take the benchmark down. With a reference (see
+// solveReference) the result is also scored against it.
 static RunResult runOnce(Optimizer::Type type,
 		const ParametersMap & parameters,
 		int iterations,
@@ -351,7 +454,8 @@ static RunResult runOnce(Optimizer::Type type,
 		int warmups,
 		int rootId,
 		const std::map<int, Transform> & poses,
-		const std::multimap<int, Link> & links)
+		const std::multimap<int, Link> & links,
+		const std::map<int, Transform> & ref)
 {
 	RunResult res;
 	memset(&res, 0, sizeof(res));
@@ -385,6 +489,14 @@ static RunResult runOnce(Optimizer::Type type,
 			RunResult r;
 			r.ms = ms;
 			r.cost = refCost(out, links, slam2d);
+			r.refRmse = -1.0;
+			if(!ref.empty())
+			{
+				float tRmse, tMean, tMed, tStd, tMin, tMax, rRmse, rMean, rMed, rStd, rMin, rMax;
+				graph::calcRMSE(ref, out, tRmse, tMean, tMed, tStd, tMin, tMax,
+					rRmse, rMean, rMed, rStd, rMin, rMax, slam2d);
+				r.refRmse = tRmse;
+			}
 			r.iterations = iters;
 			r.maxRssMb = usage.ru_maxrss / 1024;
 			r.ok = true;
@@ -392,7 +504,7 @@ static RunResult runOnce(Optimizer::Type type,
 			(void)written;
 		}
 		close(fd[1]);
-		_exit(0);
+		childExit(0);
 	}
 	close(fd[1]);
 	if(pid > 0)
@@ -477,20 +589,34 @@ static RunResult runOnceBA(Optimizer::Type type,
 			r.pxP97 = score.pxP97;
 			r.pxP98 = score.pxP98;
 			r.pxP99 = score.pxP99;
+			// the outliers arael reports stay in its solve unless
+			// Arael/BaPruneChi2 prunes them; the other backends drop theirs
+			double pruneChi2 = Parameters::defaultAraelBaPruneChi2();
+			Parameters::parse(parameters, Parameters::kAraelBaPruneChi2(), pruneChi2);
+			const bool removes = !(type == Optimizer::kTypeArael && pruneChi2 <= 0.0);
+			int outlierCount = 0;
 			for(const auto & w : outliers)
 			{
-				r.rejected += (int)w.second.size();
+				outlierCount += (int)w.second.size();
 			}
-			r.keptCost = refBaCost(out, links, models, points, wordReferences,
-				pixelVariance, disparityVariance, robustKernelDelta, baseline,
-				covarianceIgnored, &outliers).cost;
+			r.removed = removes ? outlierCount : 0;
+			r.flagged = removes ? 0 : outlierCount;
+			const BaScore kept = removes ?
+				refBaCost(out, links, models, points, wordReferences,
+					pixelVariance, disparityVariance, robustKernelDelta, baseline,
+					covarianceIgnored, &outliers) :
+				score;
+			r.keptCost = kept.cost;
+			r.keptP50 = kept.pxP50;
+			r.keptP90 = kept.pxP90;
+			r.keptP99 = kept.pxP99;
 			r.maxRssMb = usage.ru_maxrss / 1024;
 			r.ok = true;
 			ssize_t written = write(fd[1], &r, sizeof(r));
 			(void)written;
 		}
 		close(fd[1]);
-		_exit(0);
+		childExit(0);
 	}
 	close(fd[1]);
 	if(pid > 0)
@@ -529,7 +655,7 @@ static long forkedBaselineRssMb()
 		ssize_t written = write(fd[1], &mb, sizeof(mb));
 		(void)written;
 		close(fd[1]);
-		_exit(0);
+		childExit(0);
 	}
 	close(fd[1]);
 	long mb = -1;
@@ -549,6 +675,63 @@ static double median(std::vector<double> v)
 {
 	std::sort(v.begin(), v.end());
 	return v[v.size() / 2];
+}
+
+// --converge: the fewest iterations whose result comes within tol
+// (relative, either side) of the result at maxIters, by doubling then
+// bisection over untimed solves of the same problem. Either side because a
+// backend minimizing its own residual convention (g2o's and GTSAM's stereo
+// term) can pass below its final cost on the shared scale. Relies on a result
+// that reached that band staying in it. iterations is -1 when the solve at
+// maxIters fails.
+struct Convergence
+{
+	int iterations;
+	bool converged;   // needed at most half of maxIters
+	double limitCost; // the result at maxIters
+};
+
+static Convergence findConvergence(const std::function<RunResult(int)> & solveAt,
+		int maxIters,
+		double tol)
+{
+	Convergence c;
+	c.iterations = -1;
+	c.converged = false;
+	c.limitCost = 0.0;
+	const RunResult limit = solveAt(maxIters);
+	if(!limit.ok)
+	{
+		return c;
+	}
+	c.limitCost = limit.cost;
+	const double band = tol * std::fabs(limit.cost);
+	auto reached = [&](int k) {
+		const RunResult r = solveAt(k);
+		return r.ok && std::fabs(r.cost - limit.cost) <= band;
+	};
+	int lo = 0;   // known not to reach the target (0: none tried)
+	int hi = 1;
+	while(hi < maxIters && !reached(hi))
+	{
+		lo = hi;
+		hi = std::min(2 * hi, maxIters);
+	}
+	while(hi - lo > 1)
+	{
+		const int mid = lo + (hi - lo) / 2;
+		if(reached(mid))
+		{
+			hi = mid;
+		}
+		else
+		{
+			lo = mid;
+		}
+	}
+	c.iterations = hi;
+	c.converged = hi <= maxIters / 2;
+	return c;
 }
 
 static bool writeAll(int fd, const void * data, size_t n)
@@ -866,7 +1049,11 @@ static int runBaBenchmark(const std::string & dbPath,
 		int warmups,
 		int rootId,
 		const std::map<int, Transform> & posesGuess,
-		const std::multimap<int, Link> & links)
+		const std::multimap<int, Link> & links,
+		bool converge,
+		int convergeMax,
+		double convergeTol,
+		int preIterations)
 {
 	{
 		std::vector<Optimizer::Type> keep;
@@ -911,6 +1098,12 @@ static int runBaBenchmark(const std::string & dbPath,
 	std::map<int, std::vector<CameraModel> > models;
 	std::map<int, cv::Point3f> points3DMap;
 	std::map<int, std::map<int, FeatureBA> > wordReferences;
+	// built as rtabmap builds it: an Optimizer/RobustKernelDelta override
+	// changes how the backends solve, not the problem (the feature
+	// registration's own bundle adjustment would keep or drop
+	// correspondences by it)
+	ParametersMap buildParameters = parameters;
+	buildParameters.erase(Parameters::kOptimizerRobustKernelDelta());
 	{
 		int fd[2];
 		if(pipe(fd) != 0)
@@ -922,10 +1115,10 @@ static int runBaBenchmark(const std::string & dbPath,
 		if(pid == 0)
 		{
 			close(fd[0]);
-			int code = buildBaProblem(fd[1], dbPath, parameters, preType, iterations,
+			int code = buildBaProblem(fd[1], dbPath, buildParameters, preType, preIterations,
 				epsilon, slam2d, rootId, posesGuess, links);
 			close(fd[1]);
-			_exit(code);
+			childExit(code);
 		}
 		close(fd[1]);
 		const bool ok = pid > 0 &&
@@ -1014,42 +1207,45 @@ static int runBaBenchmark(const std::string & dbPath,
 		}
 	}
 
+	auto solveAt = [&](const BaRow & row, int iters, int warm) {
+		return runOnceBA(row.type, row.params, iters, epsilon, slam2d, warm, baRoot,
+			prePoses, links, models, points3DMap, wordReferences, pixelVariance,
+			disparityVariance, robustKernelDelta, baseline, covarianceIgnored);
+	};
+	std::vector<Convergence> conv(rows.size());
+	std::vector<int> rowIters(rows.size(), iterations);
+	if(converge)
+	{
+		for(size_t i = 0; i < rows.size(); ++i)
+		{
+			conv[i] = findConvergence(
+				[&](int k) { return solveAt(rows[i], k, 0); }, convergeMax, convergeTol);
+			rowIters[i] = conv[i].iterations;
+		}
+	}
+
 	std::vector<std::vector<RunResult> > results(rows.size());
 	for(int rep = 0; rep < reps; ++rep)
 	{
 		for(size_t i = 0; i < rows.size(); ++i)
 		{
-			results[i].push_back(runOnceBA(rows[i].type, rows[i].params, iterations,
-				epsilon, slam2d, warmups, baRoot, prePoses, links, models, points3DMap,
-				wordReferences, pixelVariance, disparityVariance, robustKernelDelta,
-				baseline, covarianceIgnored));
+			if(rowIters[i] > 0)
+			{
+				results[i].push_back(solveAt(rows[i], rowIters[i], warmups));
+			}
 		}
 	}
 
 	for(size_t i = 0; i < rows.size(); ++i)
 	{
-		std::vector<double> ms, cost, px, rejected, rss;
+		std::vector<double> ms, cost, kept, p50, p90, p95, p96, p97, p98, p99,
+			keptP50, keptP90, keptP99, removed, flagged, rss;
 		for(const RunResult & r : results[i])
 		{
 			if(r.ok)
 			{
 				ms.push_back(r.ms);
 				cost.push_back(r.cost);
-				px.push_back(r.pxRmse);
-				rejected.push_back(r.rejected);
-				rss.push_back(r.maxRssMb);
-			}
-		}
-		if(ms.empty())
-		{
-			printf("%-8s FAILED\n", rows[i].label.c_str());
-			continue;
-		}
-		std::vector<double> kept, p50, p90, p95, p96, p97, p98, p99;
-		for(const RunResult & r : results[i])
-		{
-			if(r.ok)
-			{
 				kept.push_back(r.keptCost);
 				p50.push_back(r.pxP50);
 				p90.push_back(r.pxP90);
@@ -1058,22 +1254,44 @@ static int runBaBenchmark(const std::string & dbPath,
 				p97.push_back(r.pxP97);
 				p98.push_back(r.pxP98);
 				p99.push_back(r.pxP99);
+				keptP50.push_back(r.keptP50);
+				keptP90.push_back(r.keptP90);
+				keptP99.push_back(r.keptP99);
+				removed.push_back(r.removed);
+				flagged.push_back(r.flagged);
+				rss.push_back(r.maxRssMb);
 			}
+		}
+		if(ms.empty())
+		{
+			printf("%-8s FAILED\n", rows[i].label.c_str());
+			continue;
 		}
 		printf("%-8s solve_ms=%-10.2f cost_all=%-14.4f cost_kept=%-14.4f "
 			"px_p50=%-7.3f px_p90=%-7.3f px_p95=%-7.3f px_p96=%-7.3f "
-			"px_p97=%-7.3f px_p98=%-7.3f px_p99=%-8.3f rejected=%-6.0f "
-			"maxrss_mb=%.0f (%zu/%zu runs ok)\n",
+			"px_p97=%-7.3f px_p98=%-7.3f px_p99=%-8.3f "
+			"kept_px_p50=%-7.3f kept_px_p90=%-7.3f kept_px_p99=%-8.3f "
+			"removed=%-6.0f flagged=%-6.0f ",
 			rows[i].label.c_str(), median(ms), median(cost), median(kept),
 			median(p50), median(p90), median(p95), median(p96),
 			median(p97), median(p98), median(p99),
-			median(rejected), median(rss), ms.size(), results[i].size());
+			median(keptP50), median(keptP90), median(keptP99),
+			median(removed), median(flagged));
+		if(converge)
+		{
+			printf("converge_iters=%d converged=%d limit_cost=%.4f ",
+				conv[i].iterations, conv[i].converged ? 1 : 0, conv[i].limitCost);
+		}
+		printf("maxrss_mb=%.0f (%zu/%zu runs ok)\n", median(rss), ms.size(), results[i].size());
 	}
 	return 0;
 }
 
 int main(int argc, char * argv[])
 {
+	// line-buffered even into a file: a forked child inherits whatever is
+	// still buffered and would print it again when it flushes on exit
+	setvbuf(stdout, NULL, _IOLBF, 0);
 	ULogger::setType(ULogger::kTypeConsole);
 	ULogger::setLevel(ULogger::kError);
 
@@ -1083,6 +1301,11 @@ int main(int argc, char * argv[])
 	double epsilon = 0.00001;
 	bool slam2d = false;
 	bool ba = false;
+	int refStrategy = -1;
+	bool converge = false;
+	int convergeMax = 1000;
+	int preIterations = -1;
+	double convergeTol = 1e-5;
 	std::vector<Optimizer::Type> strategies;
 	std::string dbPath;
 
@@ -1125,6 +1348,31 @@ int main(int argc, char * argv[])
 		{
 			ba = true;
 		}
+		else if(strcmp(argv[i], "--ref-strategy") == 0 && i + 1 < argc)
+		{
+			refStrategy = atoi(argv[++i]);
+		}
+		else if(strcmp(argv[i], "--converge") == 0)
+		{
+			converge = true;
+		}
+		else if(strcmp(argv[i], "--udebug") == 0)
+		{
+			ULogger::setType(ULogger::kTypeConsole);
+			ULogger::setLevel(ULogger::kDebug);
+		}
+		else if(strcmp(argv[i], "--pre-iterations") == 0 && i + 1 < argc)
+		{
+			preIterations = atoi(argv[++i]);
+		}
+		else if(strcmp(argv[i], "--converge-max") == 0 && i + 1 < argc)
+		{
+			convergeMax = atoi(argv[++i]);
+		}
+		else if(strcmp(argv[i], "--converge-tol") == 0 && i + 1 < argc)
+		{
+			convergeTol = atof(argv[++i]);
+		}
 		else if(strcmp(argv[i], "--strategy") == 0 && i + 1 < argc)
 		{
 			for(const char * p = argv[++i]; *p; ++p)
@@ -1145,9 +1393,14 @@ int main(int argc, char * argv[])
 			showUsage();
 		}
 	}
-	if(dbPath.empty() || reps < 1 || warmups < 0)
+	if(dbPath.empty() || reps < 1 || warmups < 0 || convergeMax < 2 || convergeTol < 0.0)
 	{
 		showUsage();
+	}
+	if(refStrategy >= 0 && (ba || !Optimizer::isAvailable((Optimizer::Type)refStrategy)))
+	{
+		printf("--ref-strategy needs a pose graph (no --ba) and a compiled-in backend.\n");
+		return 1;
 	}
 	if(strategies.empty())
 	{
@@ -1279,15 +1532,49 @@ int main(int argc, char * argv[])
 		}
 	}
 
-	printf("db=%s poses=%zu links=%zu initial_cost=%.4f mode=%s%s iterations=%d epsilon=%g reps=%d warmup=%d\n",
+	printf("db=%s poses=%zu links=%zu initial_cost=%.4f mode=%s%s iterations=%d epsilon=%g reps=%d warmup=%d%s%s",
 		dbPath.c_str(), poses.size(), usable.size(),
 		refCost(poses, usable, slam2d), slam2d ? "2d" : "3d", ba ? "+ba" : "",
-		iterations, epsilon, reps, warmups);
+		iterations, epsilon, reps, warmups,
+		refStrategy >= 0 ? " ref=" : "",
+		refStrategy >= 0 ? strategyName((Optimizer::Type)refStrategy) : "");
+	if(converge)
+	{
+		printf(" converge_max=%d converge_tol=%g", convergeMax, convergeTol);
+	}
+	printf("\n");
 
 	if(ba)
 	{
 		return runBaBenchmark(dbPath, parameters, strategies, reps, iterations, epsilon,
-			slam2d, warmups, rootId, poses, usable);
+			slam2d, warmups, rootId, poses, usable, converge, convergeMax, convergeTol,
+			preIterations > 0 ? preIterations : iterations);
+	}
+
+	std::map<int, Transform> ref;
+	if(refStrategy >= 0)
+	{
+		ref = solveReference((Optimizer::Type)refStrategy, parameters, iterations, epsilon,
+			slam2d, rootId, poses, usable);
+		if(ref.empty())
+		{
+			printf("Reference solve (%s) failed.\n", strategyName((Optimizer::Type)refStrategy));
+			return 1;
+		}
+	}
+
+	std::map<Optimizer::Type, Convergence> conv;
+	std::map<Optimizer::Type, int> cap;
+	for(Optimizer::Type t : strategies)
+	{
+		cap[t] = iterations;
+		if(converge)
+		{
+			conv[t] = findConvergence(
+				[&](int k) { return runOnce(t, parameters, k, epsilon, slam2d, 0, rootId, poses, usable, ref); },
+				convergeMax, convergeTol);
+			cap[t] = conv[t].iterations;
+		}
 	}
 
 	std::map<Optimizer::Type, std::vector<RunResult> > results;
@@ -1295,20 +1582,24 @@ int main(int argc, char * argv[])
 	{
 		for(Optimizer::Type t : strategies)
 		{
-			results[t].push_back(
-				runOnce(t, parameters, iterations, epsilon, slam2d, warmups, rootId, poses, usable));
+			if(cap[t] > 0)
+			{
+				results[t].push_back(
+					runOnce(t, parameters, cap[t], epsilon, slam2d, warmups, rootId, poses, usable, ref));
+			}
 		}
 	}
 
 	for(Optimizer::Type t : strategies)
 	{
-		std::vector<double> ms, cost, iters, rss;
+		std::vector<double> ms, cost, refRmse, iters, rss;
 		for(const RunResult & r : results[t])
 		{
 			if(r.ok)
 			{
 				ms.push_back(r.ms);
 				cost.push_back(r.cost);
+				refRmse.push_back(r.refRmse);
 				iters.push_back(r.iterations);
 				rss.push_back(r.maxRssMb);
 			}
@@ -1318,9 +1609,18 @@ int main(int argc, char * argv[])
 			printf("%-6s FAILED\n", strategyName(t));
 			continue;
 		}
-		printf("%-6s solve_ms=%-9.2f iters=%-4.0f cost=%-12.4f maxrss_mb=%.0f (%zu/%zu runs ok)\n",
-			strategyName(t), median(ms), median(iters), median(cost), median(rss),
-			ms.size(), results[t].size());
+		printf("%-6s solve_ms=%-9.2f iters=%-4.0f cost=%-12.4f ",
+			strategyName(t), median(ms), median(iters), median(cost));
+		if(!ref.empty())
+		{
+			printf("ref_rmse_m=%-8.4f ", median(refRmse));
+		}
+		if(converge)
+		{
+			printf("converge_iters=%d converged=%d limit_cost=%.4f ",
+				conv[t].iterations, conv[t].converged ? 1 : 0, conv[t].limitCost);
+		}
+		printf("maxrss_mb=%.0f (%zu/%zu runs ok)\n", median(rss), ms.size(), results[t].size());
 	}
 	return 0;
 }
